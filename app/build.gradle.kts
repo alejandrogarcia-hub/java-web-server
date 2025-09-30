@@ -57,7 +57,12 @@ application {
 tasks.named<Jar>("jar") {
     manifest {
         attributes["Main-Class"] = "ch.alejandrogarciahub.webserver.WebServer"
+        attributes["Implementation-Version"] = project.version
     }
+    // Configure JAR naming: java-web-server-{version}.jar
+    archiveBaseName.set("java-web-server")
+    archiveVersion.set(project.version.toString())
+
     // Create a fat JAR with all dependencies
     duplicatesStrategy = DuplicatesStrategy.EXCLUDE
     from(configurations.runtimeClasspath.get().map { if (it.isDirectory) it else zipTree(it) })

@@ -1,0 +1,124 @@
+name: Release
+
+on:
+  # Manual trigger with version input
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: 'Release version (e.g., 1.0.0)'
+        required: true
+        type: string
+
+  # Automated trigger when tags are pushed
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write  # Required for creating releases and pushing tags
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history and tags
+
+      - name: Set release version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.release_version }}"
+          else
+            # Extract version from tag (remove 'v' prefix)
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          fi
+
+          # Validate SemVer pattern (supports pre-release identifiers)
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
+            echo "ERROR: Version '$VERSION' does not match SemVer pattern"
+            exit 1
+          fi
+
+          echo "RELEASE_VERSION=$VERSION" >> $GITHUB_ENV
+          echo "TAG_NAME=v$VERSION" >> $GITHUB_ENV
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if tag already exists
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          if git rev-parse "${{ env.TAG_NAME }}" >/dev/null 2>&1; then
+            echo "ERROR: Tag ${{ env.TAG_NAME }} already exists"
+            exit 1
+          fi
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
+
+      - name: Run tests
+        run: ./gradlew clean test
+
+      - name: Build release JAR
+        run: ./gradlew :app:build -x test -Pversion=${{ env.RELEASE_VERSION }}
+
+      - name: Verify JAR was created
+        run: |
+          JAR_FILE="app/build/libs/java-web-server-${{ env.RELEASE_VERSION }}.jar"
+          if [ ! -f "$JAR_FILE" ]; then
+            echo "ERROR: Expected JAR file not found: $JAR_FILE"
+            ls -la app/build/libs/
+            exit 1
+          fi
+          echo "JAR_FILE=$JAR_FILE" >> $GITHUB_ENV
+
+      - name: Create and push tag
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ env.TAG_NAME }}" -m "Release ${{ env.RELEASE_VERSION }}"
+          git push origin "${{ env.TAG_NAME }}"
+
+      - name: Get previous tag
+        id: previous_tag
+        run: |
+          PREVIOUS_TAG=$(git describe --tags --abbrev=0 "${{ env.TAG_NAME }}^" 2>/dev/null || echo "")
+          echo "previous_tag=$PREVIOUS_TAG" >> $GITHUB_OUTPUT
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          if [ -n "${{ steps.previous_tag.outputs.previous_tag }}" ]; then
+            echo "## Changes since ${{ steps.previous_tag.outputs.previous_tag }}" > CHANGELOG.txt
+            echo "" >> CHANGELOG.txt
+            git log --pretty=format:"- %s (%h)" ${{ steps.previous_tag.outputs.previous_tag }}..${{ env.TAG_NAME }} >> CHANGELOG.txt
+          else
+            echo "## Initial Release" > CHANGELOG.txt
+            echo "" >> CHANGELOG.txt
+            echo "First release of Java Web Server" >> CHANGELOG.txt
+          fi
+          cat CHANGELOG.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG_NAME }}
+          name: Release ${{ env.RELEASE_VERSION }}
+          body_path: CHANGELOG.txt
+          draft: false
+          prerelease: ${{ contains(env.RELEASE_VERSION, '-') }}
+          files: |
+            ${{ env.JAR_FILE }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
