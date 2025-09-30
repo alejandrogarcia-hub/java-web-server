@@ -1,0 +1,43 @@
+# Ignore build output
+build/
+app/build/
+app/bin/
+.gradle/
+*.class
+
+# Ignore logs
+logs/
+app/logs/
+*.log
+
+# Ignore IDE files
+.vscode/
+.idea/
+*.iml
+*.iws
+*.ipr
+
+# Ignore Git
+.git/
+.gitignore
+.gitattributes
+
+# Ignore documentation (not needed in container)
+*.md
+AGENTS.md
+CLAUDE.md
+LOGGING.md
+README.md
+NOTES.md
+
+# Ignore test resources (not needed in production)
+app/src/test/
+
+# Ignore Docker files themselves
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# Ignore OS files
+.DS_Store
+Thumbs.db
