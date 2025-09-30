@@ -1,0 +1,32 @@
+version: '3.9'
+
+services:
+  web-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: java-web-server:latest
+    container_name: java-web-server
+    ports:
+      - "8080:8080"
+    environment:
+      - ENV=production
+      - LOG_DIR=/var/log/webserver
+      # Optional: Override Java options
+      # - JAVA_OPTS=-XX:MaxRAMPercentage=75.0 -XX:+UseContainerSupport
+    volumes:
+      # Mount logs directory for persistence
+      - ./logs:/var/log/webserver
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+    networks:
+      - webserver-network
+
+networks:
+  webserver-network:
+    driver: bridge
