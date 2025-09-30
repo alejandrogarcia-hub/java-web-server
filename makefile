@@ -1,4 +1,4 @@
-.PHONEY: pipeline
+.PHONY: pipeline clean test run-dev run-prod
 
 pipeline:
 	./gradlew build
@@ -10,5 +10,8 @@ clean:
 test:
 	./gradlew test
 
-run:
-	./gradlew run
+run-dev:
+	ENV=dev ./gradlew run --quiet
+
+run-prod:
+	ENV=production ./gradlew run --quiet

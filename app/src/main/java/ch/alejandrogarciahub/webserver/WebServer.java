@@ -3,53 +3,79 @@
  */
 package ch.alejandrogarciahub.webserver;
 
+import java.io.IOException;
+import java.net.URL;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Locale;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.slf4j.MDC;
 
 public class WebServer {
-    // Static initializer to configure logback BEFORE logger is created
+
+    private static final String ENVIRONMENT = System.getenv().getOrDefault("ENV", "dev");
+
     static {
-        if (System.getProperty("logback.configurationFile") == null) {
-            String env = System.getenv().getOrDefault("ENV", "dev");
-            String logbackConfig = "logback-" + env + ".xml";
-            System.setProperty("logback.configurationFile", logbackConfig);
-        }
+        configureLogging();
     }
 
     private static final Logger logger = LoggerFactory.getLogger(WebServer.class);
+
+    private static void configureLogging() {
+        if (System.getProperty("logback.configurationFile") != null) {
+            return;
+        }
+
+        final ClassLoader classLoader = WebServer.class.getClassLoader();
+        final String normalizedEnv = ENVIRONMENT.toLowerCase(Locale.ROOT);
+        final String[] candidates = {
+                String.format("logback-%s.xml", normalizedEnv),
+                "logback.xml"
+        };
+
+        for (final String candidate : candidates) {
+            final URL resource = classLoader.getResource(candidate);
+            if (resource != null) {
+                System.setProperty("logback.configurationFile", resource.toExternalForm());
+                break;
+            }
+        }
+
+        if (System.getProperty("logback.configurationFile") == null) {
+            System.err.printf("No logback configuration found for %s (env=%s)%n; using library defaults.%n",
+                    System.getProperty("logback.configurationFile"), normalizedEnv);
+        }
+
+        if ("production".equals(normalizedEnv)) {
+            ensureLogDirectoryExists();
+        }
+    }
+
+    private static void ensureLogDirectoryExists() {
+        final String logDirectory = System.getenv().getOrDefault("LOG_DIR", "./logs");
+        try {
+            Files.createDirectories(Path.of(logDirectory));
+        } catch (final IOException exception) {
+            System.err.printf("Failed to create log directory '%s': %s%n", logDirectory, exception.getMessage());
+        }
+    }
 
     public final String getGreeting() {
         return "Hello World!";
     }
 
     public static void main(final String[] args) {
-        // Log application startup
-        String env = System.getenv().getOrDefault("ENV", "dev");
-        logger.info("Starting Java Web Server");
-        logger.debug("Environment: {}", env);
+        logger.info("Starting Java Web Server (env={})", ENVIRONMENT);
 
-        // Test various log levels
-        logger.trace("This is a TRACE message");
-        logger.debug("This is a DEBUG message with greeting: {}", new WebServer().getGreeting());
-        logger.info("This is an INFO message");
-        logger.warn("This is a WARN message");
-        logger.error("This is an ERROR message");
-
-        // Test MDC (Mapped Diagnostic Context) for correlation IDs
-        MDC.put("requestId", "test-req-123");
-        MDC.put("userId", "user-456");
-        logger.info("Testing MDC context - this log should include requestId and userId");
-        MDC.clear();
-
-        // Test exception logging
         try {
-            throw new RuntimeException("Test exception for logging demonstration");
-        } catch (Exception e) {
-            logger.error("Caught exception during startup test", e);
+            // TODO: Initialize networking components and start accepting requests.
+            logger.info("Web Server initialization complete");
+        } catch (final Exception exception) {
+            logger.error("Web Server failed to start", exception);
+            Runtime.getRuntime().exit(1);
         }
 
-        logger.info("Web Server initialization complete");
         System.out.println(new WebServer().getGreeting());
     }
 }
