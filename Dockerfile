@@ -10,6 +10,9 @@ WORKDIR /build
 COPY gradle/ gradle/
 COPY gradlew settings.gradle.kts gradle.properties ./
 
+# Copy checkstyle configuration (required by build)
+COPY config/ config/
+
 # Copy app module build file
 COPY app/build.gradle.kts app/build.gradle.kts
 
