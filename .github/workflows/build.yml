@@ -27,17 +27,8 @@ jobs:
         with:
           cache-read-only: ${{ github.ref != 'refs/heads/main' }}
 
-      - name: Check code formatting
-        run: ./gradlew spotlessCheck
-
-      - name: Run linters
-        run: ./gradlew checkstyleMain checkstyleTest
-
       - name: Build with Gradle
         run: ./gradlew build
-
-      - name: Run tests
-        run: ./gradlew test
 
       - name: Upload build artifacts
         if: github.ref == 'refs/heads/main'

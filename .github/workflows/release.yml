@@ -66,8 +66,8 @@ jobs:
         with:
           cache-read-only: false
 
-      - name: Run tests
-        run: ./gradlew clean test
+      - name: Run verification suite
+        run: ./gradlew clean build
 
       - name: Build release JAR
         run: ./gradlew :app:build -x test -Pversion=${{ env.RELEASE_VERSION }}
