@@ -26,9 +26,10 @@ dependencies {
     testImplementation("org.mockito:mockito-core:5.8.0")
     testImplementation("org.assertj:assertj-core:3.24.2")
     
-    // Logging (optional but useful)
+    // Logging
     implementation("org.slf4j:slf4j-api:2.0.9")
     implementation("ch.qos.logback:logback-classic:1.4.14")
+    implementation("net.logstash.logback:logstash-logback-encoder:8.1")
 }
 
 testing {

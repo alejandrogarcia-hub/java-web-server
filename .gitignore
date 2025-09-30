@@ -31,3 +31,8 @@ build
 
 # Application specific files
 NOTES.md
+
+# Log directory
+logs/
+app/logs/
+app/bin
