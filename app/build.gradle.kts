@@ -54,6 +54,15 @@ application {
     mainClass = "ch.alejandrogarciahub.webserver.WebServer"
 }
 
+tasks.named<Jar>("jar") {
+    manifest {
+        attributes["Main-Class"] = "ch.alejandrogarciahub.webserver.WebServer"
+    }
+    // Create a fat JAR with all dependencies
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    from(configurations.runtimeClasspath.get().map { if (it.isDirectory) it else zipTree(it) })
+}
+
 tasks.named<Test>("test") {
     useJUnitPlatform()
 }
