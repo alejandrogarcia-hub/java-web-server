@@ -25,6 +25,13 @@ RUN --mount=type=cache,target=/root/.gradle \
 # ========================================
 FROM eclipse-temurin:21-jre-jammy
 
+# OCI labels for container metadata and GitHub integration
+LABEL org.opencontainers.image.source="https://github.com/alejandrogarcia-hub/java-web-server"
+LABEL org.opencontainers.image.description="Multi-threaded HTTP/1.1 web server with thread-pooling and keep-alive support, implemented in Java 21"
+LABEL org.opencontainers.image.licenses="MIT"
+LABEL org.opencontainers.image.title="Java Web Server"
+LABEL org.opencontainers.image.vendor="alejandrogarcia-hub"
+
 # Create non-root user for security
 RUN groupadd -r webserver && useradd -r -g webserver webserver
 
