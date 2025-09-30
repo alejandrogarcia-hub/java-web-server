@@ -10,6 +10,8 @@ plugins {
     // Apply the application plugin to add support for building a CLI application in Java.
     application
     java
+    checkstyle
+    id("com.diffplug.spotless") version "7.0.2"
 }
 
 repositories {
@@ -70,4 +72,34 @@ tasks.named<Jar>("jar") {
 
 tasks.named<Test>("test") {
     useJUnitPlatform()
+}
+
+// Spotless configuration for code formatting
+spotless {
+    java {
+        target("src/**/*.java")
+        googleJavaFormat("1.25.2")  // Latest version for Java 21
+        removeUnusedImports()
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
+
+    format("misc") {
+        target("*.md", ".gitignore")
+        trimTrailingWhitespace()
+        endWithNewline()
+    }
+}
+
+// Checkstyle configuration for style linting
+checkstyle {
+    toolVersion = "10.20.2"
+    configFile = file("${rootProject.projectDir}/config/checkstyle/checkstyle.xml")
+    maxWarnings = 0  // Fail on any warnings (strict mode)
+    maxErrors = 0
+}
+
+// Integrate quality checks into build task
+tasks.named("build") {
+    dependsOn("spotlessCheck", "checkstyleMain", "checkstyleTest")
 }

@@ -1,4 +1,4 @@
-.PHONY: pipeline clean test run-dev run-prod docker-build docker-run docker-up docker-down docker-logs docker-clean
+.PHONY: pipeline clean test run-dev run-prod format format-check lint quality-check quality-fix docker-build docker-run docker-up docker-down docker-logs docker-clean
 
 pipeline:
 	./gradlew build
@@ -15,6 +15,22 @@ run-dev:
 
 run-prod:
 	ENV=production ./gradlew run --quiet
+
+# Code quality targets
+format:
+	./gradlew spotlessApply
+
+format-check:
+	./gradlew spotlessCheck
+
+lint:
+	./gradlew checkstyleMain checkstyleTest
+
+quality-check:
+	./gradlew spotlessCheck checkstyleMain checkstyleTest
+
+quality-fix:
+	./gradlew spotlessApply
 
 # Docker commands
 docker-build:

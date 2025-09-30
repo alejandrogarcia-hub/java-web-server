@@ -8,74 +8,72 @@ import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
-
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 public class WebServer {
 
-    private static final String ENVIRONMENT = System.getenv().getOrDefault("ENV", "dev");
+  private static final String ENVIRONMENT = System.getenv().getOrDefault("ENV", "dev");
 
-    static {
-        configureLogging();
+  static {
+    configureLogging();
+  }
+
+  private static final Logger logger = LoggerFactory.getLogger(WebServer.class);
+
+  private static void configureLogging() {
+    if (System.getProperty("logback.configurationFile") != null) {
+      return;
     }
 
-    private static final Logger logger = LoggerFactory.getLogger(WebServer.class);
+    final ClassLoader classLoader = WebServer.class.getClassLoader();
+    final String normalizedEnv = ENVIRONMENT.toLowerCase(Locale.ROOT);
+    final String[] candidates = {String.format("logback-%s.xml", normalizedEnv), "logback.xml"};
 
-    private static void configureLogging() {
-        if (System.getProperty("logback.configurationFile") != null) {
-            return;
-        }
-
-        final ClassLoader classLoader = WebServer.class.getClassLoader();
-        final String normalizedEnv = ENVIRONMENT.toLowerCase(Locale.ROOT);
-        final String[] candidates = {
-                String.format("logback-%s.xml", normalizedEnv),
-                "logback.xml"
-        };
-
-        for (final String candidate : candidates) {
-            final URL resource = classLoader.getResource(candidate);
-            if (resource != null) {
-                System.setProperty("logback.configurationFile", resource.toExternalForm());
-                break;
-            }
-        }
-
-        if (System.getProperty("logback.configurationFile") == null) {
-            System.err.printf("No logback configuration found for %s (env=%s)%n; using library defaults.%n",
-                    System.getProperty("logback.configurationFile"), normalizedEnv);
-        }
-
-        if ("production".equals(normalizedEnv)) {
-            ensureLogDirectoryExists();
-        }
+    for (final String candidate : candidates) {
+      final URL resource = classLoader.getResource(candidate);
+      if (resource != null) {
+        System.setProperty("logback.configurationFile", resource.toExternalForm());
+        break;
+      }
     }
 
-    private static void ensureLogDirectoryExists() {
-        final String logDirectory = System.getenv().getOrDefault("LOG_DIR", "./logs");
-        try {
-            Files.createDirectories(Path.of(logDirectory));
-        } catch (final IOException exception) {
-            System.err.printf("Failed to create log directory '%s': %s%n", logDirectory, exception.getMessage());
-        }
+    if (System.getProperty("logback.configurationFile") == null) {
+      System.err.printf(
+          "No logback configuration found for %s (env=%s)%n; using library defaults.%n",
+          System.getProperty("logback.configurationFile"), normalizedEnv);
     }
 
-    public final String getGreeting() {
-        return "Hello World!";
+    if ("production".equals(normalizedEnv)) {
+      ensureLogDirectoryExists();
+    }
+  }
+
+  private static void ensureLogDirectoryExists() {
+    final String logDirectory = System.getenv().getOrDefault("LOG_DIR", "./logs");
+    try {
+      Files.createDirectories(Path.of(logDirectory));
+    } catch (final IOException exception) {
+      System.err.printf(
+          "Failed to create log directory '%s': %s%n", logDirectory, exception.getMessage());
+    }
+  }
+
+  public final String getGreeting() {
+    return "Hello World!";
+  }
+
+  public static void main(final String[] args) {
+    logger.info("Starting Java Web Server (env={})", ENVIRONMENT);
+
+    try {
+      // TODO: Initialize networking components and start accepting requests.
+      logger.info("Web Server initialization complete");
+    } catch (final Exception exception) {
+      logger.error("Web Server failed to start", exception);
+      Runtime.getRuntime().exit(1);
     }
 
-    public static void main(final String[] args) {
-        logger.info("Starting Java Web Server (env={})", ENVIRONMENT);
-
-        try {
-            // TODO: Initialize networking components and start accepting requests.
-            logger.info("Web Server initialization complete");
-        } catch (final Exception exception) {
-            logger.error("Web Server failed to start", exception);
-            Runtime.getRuntime().exit(1);
-        }
-
-        System.out.println(new WebServer().getGreeting());
-    }
+    System.out.println(new WebServer().getGreeting());
+  }
 }
