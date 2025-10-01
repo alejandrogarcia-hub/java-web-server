@@ -4,13 +4,52 @@
 package ch.alejandrogarciahub.webserver;
 
 import java.io.IOException;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+import java.net.SocketException;
+import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Locale;
+import java.util.Objects;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.ReentrantLock;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+/**
+ * Multi-threaded HTTP/1.1 web server using Java 21 virtual threads.
+ *
+ * <p>This server leverages Project Loom's virtual threads via an unbounded ExecutorService to
+ * handle concurrent client connections efficiently. Each incoming connection is processed by a
+ * dedicated virtual thread, eliminating the need for traditional thread pooling.
+ *
+ * <p>Key features:
+ *
+ * <ul>
+ *   <li>Virtual thread-per-connection model for high concurrency
+ *   <li>Graceful shutdown with configurable timeout
+ *   <li>Environment variable-based configuration
+ *   <li>Responsive shutdown via periodic accept timeout
+ *   <li>Production-ready socket configuration (TCP_NODELAY, SO_REUSEADDR)
+ * </ul>
+ *
+ * <p>Configuration via environment variables:
+ *
+ * <ul>
+ *   <li><code>SERVER_PORT</code>: HTTP listening port (default: 8080)
+ *   <li><code>SERVER_ACCEPT_TIMEOUT_MS</code>: Accept timeout in milliseconds (default: 5000)
+ *   <li><code>SERVER_BACKLOG</code>: Connection queue size (default: 100)
+ *   <li><code>SERVER_SHUTDOWN_TIMEOUT_SEC</code>: Graceful shutdown timeout (default: 30)
+ * </ul>
+ *
+ * @see <a href="https://openjdk.org/jeps/444">JEP 444: Virtual Threads</a>
+ */
 public class WebServer {
 
   private static final String ENVIRONMENT = System.getenv().getOrDefault("ENV", "dev");
@@ -20,6 +59,326 @@ public class WebServer {
   }
 
   private static final Logger logger = LoggerFactory.getLogger(WebServer.class);
+
+  // Default configuration values
+  private static final int DEFAULT_PORT = 8080;
+  private static final int DEFAULT_ACCEPT_TIMEOUT_MS = 5000;
+  private static final int DEFAULT_BACKLOG = 100;
+  private static final int DEFAULT_SHUTDOWN_TIMEOUT_SEC = 30;
+  private static final int DEFAULT_CLIENT_SO_TIMEOUT_MS = 15000;
+
+  // Server configuration (loaded from environment variables)
+  private final int port;
+  private final int acceptTimeoutMs;
+  private final int backlog;
+  private final int shutdownTimeoutSeconds;
+  private final int clientReadTimeoutMs;
+  private final ConnectionHandler connectionHandler;
+
+  // Lifecycle management
+  private volatile boolean running = false;
+  private ServerSocket serverSocket;
+  private ExecutorService executor;
+  private final ReentrantLock lifecycleLock = new ReentrantLock();
+
+  /**
+   * Constructs a WebServer with configuration loaded from environment variables.
+   *
+   * <p>Environment variables:
+   *
+   * <ul>
+   *   <li><code>SERVER_PORT</code>: HTTP listening port (default: 8080)
+   *   <li><code>SERVER_ACCEPT_TIMEOUT_MS</code>: Accept timeout in milliseconds (default: 5000)
+   *   <li><code>SERVER_BACKLOG</code>: Connection queue size (default: 100)
+   *   <li><code>SERVER_SHUTDOWN_TIMEOUT_SEC</code>: Graceful shutdown timeout (default: 30)
+   * </ul>
+   */
+  public WebServer() {
+    this(
+        getEnvAsInt("SERVER_PORT", DEFAULT_PORT),
+        getEnvAsInt("SERVER_ACCEPT_TIMEOUT_MS", DEFAULT_ACCEPT_TIMEOUT_MS),
+        getEnvAsInt("SERVER_BACKLOG", DEFAULT_BACKLOG),
+        getEnvAsInt("SERVER_SHUTDOWN_TIMEOUT_SEC", DEFAULT_SHUTDOWN_TIMEOUT_SEC),
+        getEnvAsInt("SERVER_CLIENT_SO_TIMEOUT_MS", DEFAULT_CLIENT_SO_TIMEOUT_MS),
+        new LoggingConnectionHandler());
+  }
+
+  /**
+   * Constructs a WebServer with explicit configuration parameters.
+   *
+   * <p>This constructor is package-private and intended for testing purposes only. Production code
+   * should use the default constructor that loads configuration from environment variables.
+   *
+   * @param port the port to listen on (1-65535)
+   * @param acceptTimeoutMs timeout for accept() calls in milliseconds
+   * @param backlog the maximum queue length for incoming connections
+   * @param shutdownTimeoutSeconds maximum time to wait for graceful shutdown
+   */
+  WebServer(
+      final int port,
+      final int acceptTimeoutMs,
+      final int backlog,
+      final int shutdownTimeoutSeconds) {
+    this(
+        port,
+        acceptTimeoutMs,
+        backlog,
+        shutdownTimeoutSeconds,
+        DEFAULT_CLIENT_SO_TIMEOUT_MS,
+        new LoggingConnectionHandler());
+  }
+
+  WebServer(
+      final int port,
+      final int acceptTimeoutMs,
+      final int backlog,
+      final int shutdownTimeoutSeconds,
+      final int clientReadTimeoutMs,
+      final ConnectionHandler connectionHandler) {
+    this.port = port;
+    this.acceptTimeoutMs = acceptTimeoutMs;
+    this.backlog = backlog;
+    this.shutdownTimeoutSeconds = shutdownTimeoutSeconds;
+    this.clientReadTimeoutMs = clientReadTimeoutMs;
+    // Allow tests or future HTTP pipelines to plug in their own handling logic.
+    this.connectionHandler = Objects.requireNonNull(connectionHandler, "connectionHandler");
+
+    logger.info(
+        "Server configured: port={}, acceptTimeout={}ms, backlog={}, clientReadTimeout={}ms, shutdownTimeout={}s",
+        port,
+        acceptTimeoutMs,
+        backlog,
+        clientReadTimeoutMs,
+        shutdownTimeoutSeconds);
+  }
+
+  /**
+   * Starts the HTTP server and begins accepting client connections.
+   *
+   * <p>This method blocks until {@link #shutdown()} is called from another thread. Each accepted
+   * connection is handled by a new virtual thread from an unbounded ExecutorService.
+   *
+   * <p>The accept loop uses periodic timeouts to check for shutdown requests without blocking
+   * indefinitely. Timeout exceptions are expected and indicate no client connected within the
+   * timeout period.
+   *
+   * @throws IOException if the server socket cannot be created, bound, or configured
+   * @throws IllegalStateException if the server is already running
+   */
+  public void start() throws IOException {
+    lifecycleLock.lock();
+    try {
+      if (running) {
+        throw new IllegalStateException("Server is already running");
+      }
+
+      // Create and configure server socket
+      serverSocket = new ServerSocket();
+      serverSocket.setReuseAddress(true); // Allow immediate rebind after restart
+      serverSocket.bind(new InetSocketAddress(port), backlog);
+      serverSocket.setSoTimeout(acceptTimeoutMs); // Enable periodic shutdown checks
+
+      // Create virtual thread executor
+      executor = createExecutor();
+
+      running = true;
+      logger.info("Server started on port {}", port);
+    } finally {
+      lifecycleLock.unlock();
+    }
+
+    // Accept loop - runs until shutdown() is called
+    // Use the thread interrupt flag as an additional escape hatch in case the accept loop needs
+    // to abort immediately (e.g. shutdownNow during tests).
+    while (running && !Thread.currentThread().isInterrupted()) {
+      try {
+        final Socket clientSocket = serverSocket.accept();
+        configureClientSocket(clientSocket);
+
+        logger.debug("Connection accepted from {}", clientSocket.getRemoteSocketAddress());
+
+        // Each connection runs on its own virtual thread for fast hand-off and isolation.
+        executor.submit(() -> handleConnection(clientSocket));
+
+      } catch (final SocketTimeoutException e) {
+        // Expected - no connection within timeout period, continue loop
+        continue;
+      } catch (final SocketException e) {
+        // ServerSocket was closed during shutdown
+        if (running) {
+          logger.error("ServerSocket error during accept", e);
+        }
+        break;
+      } catch (final IOException e) {
+        if (running) {
+          logger.error("Error accepting connection", e);
+        }
+      }
+    }
+
+    logger.info("Server stopped accepting new connections");
+  }
+
+  /**
+   * Configures a client socket with production-ready settings.
+   *
+   * <p>Applied configurations:
+   *
+   * <ul>
+   *   <li>TCP_NODELAY: Disables Nagle's algorithm for low-latency HTTP responses
+   *   <li>SO_TIMEOUT: Sets read timeout to prevent hanging on slow/stalled clients
+   * </ul>
+   *
+   * @param socket the client socket to configure
+   * @throws SocketException if the socket configuration fails
+   */
+  private void configureClientSocket(final Socket socket) throws SocketException {
+    socket.setTcpNoDelay(true); // Disable Nagle's algorithm for HTTP
+    socket.setSoTimeout(clientReadTimeoutMs); // Bounded read to enforce idle timeouts per request.
+    socket.setKeepAlive(true); // Allow the kernel to reap dead TCP peers on long-lived connections.
+  }
+
+  /**
+   * Handles a single client connection.
+   *
+   * <p>Currently a placeholder that logs the connection and closes the socket. This method will be
+   * extended in future phases to delegate to a RequestHandler for HTTP request processing.
+   *
+   * @param clientSocket the accepted client socket
+   */
+  private void handleConnection(final Socket clientSocket) {
+    try (clientSocket) {
+      logger.debug(
+          "Handling connection from {} on thread {}",
+          clientSocket.getRemoteSocketAddress(),
+          Thread.currentThread().getName());
+
+      connectionHandler.handle(clientSocket);
+    } catch (final InterruptedException e) {
+      Thread.currentThread().interrupt();
+      logger.debug("Connection handling interrupted", e);
+    } catch (final Exception e) {
+      logger.error("Error handling connection", e);
+    }
+  }
+
+  /**
+   * Initiates graceful shutdown of the server.
+   *
+   * <p>Shutdown sequence:
+   *
+   * <ol>
+   *   <li>Stop accepting new connections (close ServerSocket)
+   *   <li>Signal executor to reject new tasks
+   *   <li>Wait up to {@code shutdownTimeoutSeconds} for active connections to complete
+   *   <li>Force termination of remaining connections if timeout expires
+   * </ol>
+   *
+   * <p>This method blocks until shutdown completes or the timeout expires.
+   *
+   * @throws InterruptedException if interrupted while waiting for shutdown
+   */
+  public void shutdown() throws InterruptedException {
+    lifecycleLock.lock();
+    try {
+      if (!running) {
+        logger.warn("Server is not running");
+        return;
+      }
+
+      logger.info("Initiating server shutdown");
+      running = false;
+
+      // Phase 1: Stop accepting new connections
+      if (serverSocket != null && !serverSocket.isClosed()) {
+        try {
+          serverSocket.close();
+        } catch (final IOException e) {
+          logger.error("Error closing server socket", e);
+        }
+      }
+
+      // Phase 2: Shutdown executor (no new tasks accepted)
+      if (executor != null) {
+        executor.shutdown();
+
+        // Phase 3: Wait for active connections to complete
+        if (!executor.awaitTermination(shutdownTimeoutSeconds, TimeUnit.SECONDS)) {
+          logger.warn(
+              "Graceful shutdown timeout expired after {}s, forcing termination",
+              shutdownTimeoutSeconds);
+
+          // Force shutdown
+          executor.shutdownNow();
+
+          // Wait additional time for forced shutdown
+          if (!executor.awaitTermination(10, TimeUnit.SECONDS)) {
+            logger.error("Executor did not terminate after forced shutdown");
+          }
+        }
+      }
+
+      logger.info("Server shutdown complete");
+    } finally {
+      lifecycleLock.unlock();
+    }
+  }
+
+  /**
+   * Checks if the server is currently running and accepting connections.
+   *
+   * @return true if the server is running, false otherwise
+   */
+  public boolean isRunning() {
+    return running;
+  }
+
+  /**
+   * Gets the configured port number.
+   *
+   * @return the port number the server is configured to listen on
+   */
+  public int getPort() {
+    return port;
+  }
+
+  /**
+   * Retrieves an integer value from an environment variable with a default fallback.
+   *
+   * <p>If the environment variable is not set, empty, or contains an invalid integer, the default
+   * value is returned and a warning is logged.
+   *
+   * @param key the environment variable name
+   * @param defaultValue the default value to use if the variable is not set or invalid
+   * @return the parsed integer value or the default value
+   */
+  private static int getEnvAsInt(final String key, final int defaultValue) {
+    final String value = System.getenv(key);
+    if (value == null || value.isEmpty()) {
+      return defaultValue;
+    }
+    try {
+      return Integer.parseInt(value);
+    } catch (final NumberFormatException e) {
+      logger.warn(
+          "Invalid integer value for {}: '{}', using default: {}", key, value, defaultValue);
+      return defaultValue;
+    }
+  }
+
+  private ExecutorService createExecutor() {
+    // Name virtual threads to keep diagnostics (logs, dumps, profilers) readable.
+    final ThreadFactory factory = Thread.ofVirtual().name("http-worker-", 0).factory();
+    return Executors.newThreadPerTaskExecutor(factory);
+  }
+
+  private static final class LoggingConnectionHandler implements ConnectionHandler {
+
+    @Override
+    public void handle(final Socket clientSocket) {
+      // Intentionally left blank: the HTTP pipeline will plug in a richer implementation.
+    }
+  }
 
   private static void configureLogging() {
     if (System.getProperty("logback.configurationFile") != null) {
@@ -59,21 +418,29 @@ public class WebServer {
     }
   }
 
-  public final String getGreeting() {
-    return "Hello World!";
-  }
-
   public static void main(final String[] args) {
     logger.info("Starting Java Web Server (env={})", ENVIRONMENT);
 
+    final WebServer server = new WebServer();
+
+    // Register shutdown hook for graceful termination
+    Runtime.getRuntime()
+        .addShutdownHook(
+            new Thread(
+                () -> {
+                  try {
+                    server.shutdown();
+                  } catch (final InterruptedException e) {
+                    logger.error("Shutdown interrupted", e);
+                    Thread.currentThread().interrupt();
+                  }
+                }));
+
     try {
-      // TODO: Initialize networking components and start accepting requests.
-      logger.info("Web Server initialization complete");
+      server.start();
     } catch (final Exception exception) {
       logger.error("Web Server failed to start", exception);
       Runtime.getRuntime().exit(1);
     }
-
-    System.out.println(new WebServer().getGreeting());
   }
 }
