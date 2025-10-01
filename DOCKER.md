@@ -87,8 +87,10 @@ The Dockerfile uses a **two-stage build** for optimal size and security:
 
 ### Port Mapping
 
-- **Container Port:** 8080
-- **Host Port:** 8080 (configurable in docker-compose.yml)
+- **Container Port:** 8080 (driven by `SERVER_PORT`)
+- **Host Port:** 8080 by default; customize with `HOST_PORT` in `docker-compose.yml`.
+
+> **Note:** Update `SERVER_PORT` and `HOST_PORT` together so the container's health check and the published port stay in sync.
 
 ### Volume Mounts
 

@@ -10,17 +10,65 @@ A multi-threaded, file-based HTTP/1.1 web server with thread-pooling and keep-al
 - **Gradle 9.1** (build system)
 - **Docker** (optional, for containerized deployment)
 
-### Build and Run
+### Build
 
 ```bash
 # Build the project
 ./gradlew build
 
-# Run in development mode (DEBUG logs to console)
+# Or use make
+make pipeline
+```
+
+### Run
+
+```bash
+# Run in development mode
 make run-dev
 
-# Run in production mode (INFO logs to file)
+# Run in production mode
 make run-prod
+
+# Or use gradle directly
+./gradlew run
+```
+
+### Test
+
+```bash
+# Run all tests
+./gradlew test
+
+# Or use make
+make test
+```
+
+## ⚙️ Configuration
+
+The server can be configured using environment variables:
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SERVER_PORT` | HTTP listening port | `8080` |
+| `SERVER_ACCEPT_TIMEOUT_MS` | Accept loop timeout (milliseconds) | `5000` |
+| `SERVER_BACKLOG` | Connection queue size | `100` |
+| `SERVER_SHUTDOWN_TIMEOUT_SEC` | Graceful shutdown timeout (seconds) | `30` |
+| `SERVER_CLIENT_SO_TIMEOUT_MS` | Client socket read timeout (milliseconds) | `15000` |
+| `ENV` | Environment mode (`dev` or `production`) | `dev` |
+| `LOG_DIR` | Log directory (production mode only) | `./logs` |
+
+### Example
+
+```bash
+# Run with custom port
+export SERVER_PORT=9090
+./gradlew run
+
+# Run with custom configuration
+export SERVER_PORT=8888
+export SERVER_BACKLOG=200
+export SERVER_SHUTDOWN_TIMEOUT_SEC=60
+make run-dev
 ```
 
 ## 📋 Development Commands
@@ -39,12 +87,18 @@ make run-prod
 
 # Clean build artifacts
 ./gradlew clean
+
+# Format code
+./gradlew spotlessApply
+
+# Check code style
+./gradlew spotlessCheck checkstyleMain checkstyleTest
 ```
 
 ### Using Make
 
 ```bash
-# Build and run
+# Full pipeline (clean, format, quality check, test, build)
 make pipeline
 
 # Run tests
@@ -55,6 +109,12 @@ make run-dev
 
 # Run in production mode
 make run-prod
+
+# Format code
+make format
+
+# Check code quality
+make quality-check
 
 # Clean
 make clean
@@ -81,17 +141,33 @@ make docker-down
 make docker-clean
 ```
 
-### Manual Docker Commands
+### Docker with Custom Configuration
+
+**Using docker-compose with environment variables:**
+
+```bash
+# Set environment variables
+export SERVER_PORT=9090
+export SERVER_BACKLOG=200
+export HOST_PORT=9090
+
+# Run with custom configuration
+docker-compose up -d
+```
+
+**Using docker run with custom configuration:**
 
 ```bash
 # Build image
 docker build -t java-web-server:latest .
 
-# Run container
-docker run -p 8080:8080 -e ENV=production java-web-server:latest
-
-# Run with docker-compose
-docker-compose up -d
+# Run with custom port and configuration
+docker run -p 9090:9090 \
+  -e SERVER_PORT=9090 \
+  -e SERVER_BACKLOG=200 \
+  -e SERVER_SHUTDOWN_TIMEOUT_SEC=60 \
+  -e ENV=production \
+  java-web-server:latest
 ```
 
 **Docker Image:** ~288MB (Eclipse Temurin 21 JRE)
@@ -207,16 +283,14 @@ testImplementation("org.assertj:assertj-core:3.24.2")
 
 ## 🎯 Project Goals
 
-- ✅ Multi-threaded request handling
-- ✅ Thread pooling for efficient resource management
-- ✅ HTTP/1.1 keep-alive support
-- ✅ File-based static content serving
+- ✅ Multi-threaded request handling (Java 21 virtual threads)
 - ✅ JSON structured logging
 - ✅ Docker containerization
-- ⏳ HTTP request parsing (TODO)
-- ⏳ HTTP response generation (TODO)
+- ⏳ HTTP/1.1 request parsing (TODO)
+- ⏳ HTTP/1.1 response generation (TODO)
+- ⏳ Static file serving (TODO)
+- ⏳ HTTP/1.1 keep-alive support (TODO)
 - ⏳ MIME type detection (TODO)
-- ⏳ Connection management (TODO)
 
 ## 📖 Additional Documentation
 

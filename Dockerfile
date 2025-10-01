@@ -20,8 +20,11 @@ COPY app/build.gradle.kts app/build.gradle.kts
 COPY app/src/ app/src/
 
 # Build the application (skip tests for faster builds) and reuse Gradle caches between builds
+# Copy the fat JAR to a stable name (app.jar) to avoid ambiguity between classifiers
 RUN --mount=type=cache,target=/root/.gradle \
-    ./gradlew :app:build -x test --no-daemon
+    ./gradlew :app:build -x test --no-daemon && \
+    JAR_PATH=$(find app/build/libs -maxdepth 1 -name "java-web-server-*.jar" ! -name "*-plain.jar" | head -n 1) && \
+    cp "$JAR_PATH" app/build/libs/app.jar
 
 # ========================================
 # Stage 2: Production runtime with JRE
@@ -41,8 +44,8 @@ RUN groupadd -r webserver && useradd -r -g webserver webserver
 # Set working directory
 WORKDIR /app
 
-# Copy JAR from builder stage
-COPY --from=builder /build/app/build/libs/*.jar app.jar
+# Copy the runnable (fat) JAR from builder stage
+COPY --from=builder /build/app/build/libs/app.jar /app/app.jar
 
 # Create log directory and set permissions
 RUN mkdir -p /var/log/webserver && \
@@ -51,17 +54,22 @@ RUN mkdir -p /var/log/webserver && \
 # Switch to non-root user
 USER webserver
 
-# Expose port
+# Expose default port (can be overridden via SERVER_PORT env var)
 EXPOSE 8080
 
-# Environment variables
-ENV ENV=production
-ENV LOG_DIR=/var/log/webserver
-ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75.0 -XX:+UseContainerSupport"
+# Environment variables with defaults
+ENV ENV=production \
+    LOG_DIR=/var/log/webserver \
+    SERVER_PORT=8080 \
+    SERVER_ACCEPT_TIMEOUT_MS=5000 \
+    SERVER_BACKLOG=100 \
+    SERVER_SHUTDOWN_TIMEOUT_SEC=30 \
+    SERVER_CLIENT_SO_TIMEOUT_MS=15000 \
+    JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75.0 -XX:+UseContainerSupport"
 
-# Health check
+# Health check (uses SERVER_PORT env var)
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD /bin/sh -c 'exec 3<>/dev/tcp/127.0.0.1/8080 && exec 3>&-'
+    CMD /bin/sh -c 'exec 3<>/dev/tcp/127.0.0.1/${SERVER_PORT} && exec 3>&-'
 
 # Run the application
 ENTRYPOINT ["java", "-jar", "/app/app.jar"]
