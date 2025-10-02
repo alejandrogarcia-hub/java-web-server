@@ -51,6 +51,11 @@ public final class HttpResponse {
     return this;
   }
 
+  /** Returns the current HTTP status for inspection (e.g., observability hooks). */
+  public HttpStatus getStatus() {
+    return status;
+  }
+
   /**
    * Sets the HTTP version.
    *
@@ -60,6 +65,11 @@ public final class HttpResponse {
   public HttpResponse version(final HttpVersion version) {
     this.version = version;
     return this;
+  }
+
+  /** Returns the HTTP version the response is configured for. */
+  public HttpVersion getVersion() {
+    return version;
   }
 
   /**
@@ -260,6 +270,24 @@ public final class HttpResponse {
       return explicitPersistent;
     }
     return version.defaultsToKeepAlive();
+  }
+
+  /** Returns the declared number of bytes that will be written in the body. */
+  public long getDeclaredContentLength() {
+    final String value = headers.get("Content-Length");
+    if (value == null) {
+      return 0L;
+    }
+    try {
+      return Long.parseLong(value);
+    } catch (final NumberFormatException ignore) {
+      return 0L;
+    }
+  }
+
+  /** Convenience accessor for observability hooks to report body size. */
+  public long getBytesWritten() {
+    return getDeclaredContentLength();
   }
 
   /**

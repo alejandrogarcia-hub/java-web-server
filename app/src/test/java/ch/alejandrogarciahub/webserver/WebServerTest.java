@@ -6,6 +6,8 @@ package ch.alejandrogarciahub.webserver;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import ch.alejandrogarciahub.webserver.observability.AccessLogger;
+import ch.alejandrogarciahub.webserver.observability.ObservabilityConfig;
 import java.io.IOException;
 import java.net.Socket;
 import java.util.ArrayList;
@@ -59,7 +61,17 @@ class WebServerTest {
   private void startTestServer(int shutdownTimeoutSeconds, ConnectionHandler handler)
       throws Exception {
     testPort = allocateEphemeralPort();
-    server = new WebServer(testPort, 1000, 50, shutdownTimeoutSeconds, 15000, () -> handler);
+    server =
+        new WebServer(
+            testPort,
+            1000,
+            50,
+            shutdownTimeoutSeconds,
+            15000,
+            () -> handler,
+            new ObservabilityConfig(false, false, -1, "/metrics"),
+            null,
+            new AccessLogger(false));
     startServerInBackground();
     waitForServerStartup();
   }
@@ -131,7 +143,17 @@ class WebServerTest {
   void testMultipleConcurrentConnections() throws Exception {
     // Arrange
     testPort = allocateEphemeralPort();
-    server = new WebServer(testPort, 1000, 200, 10, 15000, () -> new NoopConnectionHandler());
+    server =
+        new WebServer(
+            testPort,
+            1000,
+            200,
+            10,
+            15000,
+            () -> new NoopConnectionHandler(),
+            new ObservabilityConfig(false, false, -1, "/metrics"),
+            null,
+            new AccessLogger(false));
     startServerInBackground();
     waitForServerStartup();
 
@@ -297,7 +319,17 @@ class WebServerTest {
   void testAcceptTimeoutAllowsResponsiveShutdown() throws Exception {
     // Arrange
     testPort = allocateEphemeralPort();
-    server = new WebServer(testPort, 2000, 50, 5, 15000, () -> new NoopConnectionHandler());
+    server =
+        new WebServer(
+            testPort,
+            2000,
+            50,
+            5,
+            15000,
+            () -> new NoopConnectionHandler(),
+            new ObservabilityConfig(false, false, -1, "/metrics"),
+            null,
+            new AccessLogger(false));
     startServerInBackground();
     waitForServerStartup();
 
@@ -326,7 +358,17 @@ class WebServerTest {
   void testShutdownWhenNotRunning() throws Exception {
     // Arrange - Server created but not started
     testPort = allocateEphemeralPort();
-    server = new WebServer(testPort, 1000, 50, 5, 15000, () -> new NoopConnectionHandler());
+    server =
+        new WebServer(
+            testPort,
+            1000,
+            50,
+            5,
+            15000,
+            () -> new NoopConnectionHandler(),
+            new ObservabilityConfig(false, false, -1, "/metrics"),
+            null,
+            new AccessLogger(false));
 
     // Act
     server.shutdown();
@@ -348,7 +390,17 @@ class WebServerTest {
   @Test
   void testConfigurationWithValidParameters() {
     // Arrange & Act
-    server = new WebServer(9090, 3000, 150, 45);
+    server =
+        new WebServer(
+            9090,
+            3000,
+            150,
+            45,
+            15000,
+            () -> new NoopConnectionHandler(),
+            new ObservabilityConfig(false, false, -1, "/metrics"),
+            null,
+            new AccessLogger(false));
 
     // Assert
     assertThat(server.getPort()).isEqualTo(9090);

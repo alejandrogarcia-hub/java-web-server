@@ -5,6 +5,12 @@ package ch.alejandrogarciahub.webserver;
 
 import ch.alejandrogarciahub.webserver.handler.FileServerHandler;
 import ch.alejandrogarciahub.webserver.handler.HttpConnectionHandler;
+import ch.alejandrogarciahub.webserver.handler.HttpRequestHandler;
+import ch.alejandrogarciahub.webserver.handler.MetricsRequestHandler;
+import ch.alejandrogarciahub.webserver.observability.AccessLogger;
+import ch.alejandrogarciahub.webserver.observability.HttpMetrics;
+import ch.alejandrogarciahub.webserver.observability.HttpMetricsRecorder;
+import ch.alejandrogarciahub.webserver.observability.ObservabilityConfig;
 import ch.alejandrogarciahub.webserver.parser.HttpRequestParser;
 import java.io.IOException;
 import java.net.InetSocketAddress;
@@ -17,7 +23,6 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.Locale;
-import java.util.Objects;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -77,13 +82,8 @@ public class WebServer {
   private static final int DEFAULT_MAX_HEADERS_COUNT = 100;
   private static final long DEFAULT_MAX_CONTENT_LENGTH = 10 * 1024 * 1024; // 10MB
 
-  // Server configuration (loaded from environment variables)
-  private final int port;
-  private final int acceptTimeoutMs;
-  private final int backlog;
-  private final int shutdownTimeoutSeconds;
-  private final int clientReadTimeoutMs;
-  private final ConnectionHandlerFactory connectionHandlerFactory;
+  // Server configuration
+  private final ServerConfig config;
 
   // Lifecycle management
   private volatile boolean running = false;
@@ -110,25 +110,22 @@ public class WebServer {
    * </ul>
    */
   public WebServer() {
-    this(
-        getEnvAsInt("SERVER_PORT", DEFAULT_PORT),
-        getEnvAsInt("SERVER_ACCEPT_TIMEOUT_MS", DEFAULT_ACCEPT_TIMEOUT_MS),
-        getEnvAsInt("SERVER_BACKLOG", DEFAULT_BACKLOG),
-        getEnvAsInt("SERVER_SHUTDOWN_TIMEOUT_SEC", DEFAULT_SHUTDOWN_TIMEOUT_SEC),
-        getEnvAsInt("CLIENT_READ_TIMEOUT_MS", DEFAULT_CLIENT_SO_TIMEOUT_MS),
-        createProductionHandlerFactory());
+    this(loadConfigFromEnvironment());
   }
 
-  /**
-   * Creates the production HTTP connection handler factory.
-   *
-   * <p>This factory creates instances of {@link HttpConnectionHandler} with {@link
-   * FileServerHandler} for serving static files.
-   *
-   * @return a factory that creates HTTP connection handlers
-   */
-  private static ConnectionHandlerFactory createProductionHandlerFactory() {
-    // Read configuration from environment
+  /** Builds a full {@link ServerConfig} snapshot using environment variables. */
+  private static ServerConfig loadConfigFromEnvironment() {
+    final ObservabilityConfig observabilityConfig = ObservabilityConfig.fromEnvironment();
+    final HttpMetricsRecorder sharedMetrics =
+        observabilityConfig.isMetricsEnabled() ? new HttpMetricsRecorder() : null;
+    final AccessLogger sharedAccessLogger =
+        new AccessLogger(observabilityConfig.isAccessLogEnabled());
+
+    final int port = getEnvAsInt("SERVER_PORT", DEFAULT_PORT);
+    final int acceptTimeoutMs = getEnvAsInt("SERVER_ACCEPT_TIMEOUT_MS", DEFAULT_ACCEPT_TIMEOUT_MS);
+    final int backlog = getEnvAsInt("SERVER_BACKLOG", DEFAULT_BACKLOG);
+    final int shutdownTimeoutSeconds =
+        getEnvAsInt("SERVER_SHUTDOWN_TIMEOUT_SEC", DEFAULT_SHUTDOWN_TIMEOUT_SEC);
     final int clientReadTimeoutMs =
         getEnvAsInt("CLIENT_READ_TIMEOUT_MS", DEFAULT_CLIENT_SO_TIMEOUT_MS);
     final int maxRequestLineLength =
@@ -139,16 +136,50 @@ public class WebServer {
         getEnvAsLong("HTTP_MAX_CONTENT_LENGTH", DEFAULT_MAX_CONTENT_LENGTH);
     final String documentRoot = System.getenv().getOrDefault("DOCUMENT_ROOT", "./public");
 
-    // FileServerHandler is thread-safe and can be shared
     final FileServerHandler fileHandler = new FileServerHandler(Paths.get(documentRoot));
+    final HttpRequestHandler rootHandler =
+        buildRootHandler(fileHandler, sharedMetrics, observabilityConfig);
 
-    // Factory creates a new HttpConnectionHandler and HttpRequestParser per connection
-    return () -> {
-      final HttpRequestParser parser =
-          new HttpRequestParser(
-              maxRequestLineLength, maxHeaderSize, maxHeadersCount, maxContentLength);
-      return new HttpConnectionHandler(fileHandler, parser, clientReadTimeoutMs);
-    };
+    final ConnectionHandlerFactory connectionHandlerFactory =
+        () ->
+            new HttpConnectionHandler(
+                rootHandler,
+                new HttpRequestParser(
+                    maxRequestLineLength, maxHeaderSize, maxHeadersCount, maxContentLength),
+                clientReadTimeoutMs,
+                sharedMetrics,
+                observabilityConfig,
+                sharedAccessLogger);
+
+    return ServerConfig.builder()
+        .port(port)
+        .acceptTimeoutMs(acceptTimeoutMs)
+        .backlog(backlog)
+        .shutdownTimeoutSeconds(shutdownTimeoutSeconds)
+        .clientReadTimeoutMs(clientReadTimeoutMs)
+        .connectionHandlerFactory(connectionHandlerFactory)
+        .observabilityConfig(observabilityConfig)
+        .metrics(sharedMetrics)
+        .accessLogger(sharedAccessLogger)
+        .build();
+  }
+
+  private static HttpRequestHandler buildRootHandler(
+      final HttpRequestHandler fileHandler,
+      final HttpMetrics metrics,
+      final ObservabilityConfig observabilityConfig) {
+    if (metrics != null && observabilityConfig.isMetricsEnabled()) {
+      final MetricsRequestHandler metricsHandler = new MetricsRequestHandler(metrics);
+      final String metricsPath = observabilityConfig.getMetricsEndpointPath();
+
+      return request -> {
+        if (metricsPath.equals(request.getPath())) {
+          return metricsHandler.handle(request);
+        }
+        return fileHandler.handle(request);
+      };
+    }
+    return fileHandler;
   }
 
   /**
@@ -168,37 +199,68 @@ public class WebServer {
       final int backlog,
       final int shutdownTimeoutSeconds) {
     this(
-        port,
-        acceptTimeoutMs,
-        backlog,
-        shutdownTimeoutSeconds,
-        DEFAULT_CLIENT_SO_TIMEOUT_MS,
-        () -> new LoggingConnectionHandler());
+        ServerConfig.builder()
+            .port(port)
+            .acceptTimeoutMs(acceptTimeoutMs)
+            .backlog(backlog)
+            .shutdownTimeoutSeconds(shutdownTimeoutSeconds)
+            .clientReadTimeoutMs(DEFAULT_CLIENT_SO_TIMEOUT_MS)
+            .connectionHandlerFactory(() -> new LoggingConnectionHandler())
+            .observabilityConfig(ObservabilityConfig.fromEnvironment())
+            .metrics(null)
+            .accessLogger(new AccessLogger(false))
+            .build());
   }
 
+  /**
+   * Test constructor with full parameter control.
+   *
+   * @param port server port
+   * @param acceptTimeoutMs accept timeout
+   * @param backlog connection backlog
+   * @param shutdownTimeoutSeconds shutdown timeout
+   * @param clientReadTimeoutMs client read timeout
+   * @param connectionHandlerFactory connection handler factory
+   * @param observabilityConfig observability configuration
+   * @param metrics HTTP metrics
+   * @param accessLogger access logger
+   */
+  // CHECKSTYLE:OFF: ParameterNumber - Test-only constructor
   WebServer(
       final int port,
       final int acceptTimeoutMs,
       final int backlog,
       final int shutdownTimeoutSeconds,
       final int clientReadTimeoutMs,
-      final ConnectionHandlerFactory connectionHandlerFactory) {
-    this.port = port;
-    this.acceptTimeoutMs = acceptTimeoutMs;
-    this.backlog = backlog;
-    this.shutdownTimeoutSeconds = shutdownTimeoutSeconds;
-    this.clientReadTimeoutMs = clientReadTimeoutMs;
-    // Allow tests or future HTTP pipelines to plug in their own handling logic.
-    this.connectionHandlerFactory =
-        Objects.requireNonNull(connectionHandlerFactory, "connectionHandlerFactory");
+      final ConnectionHandlerFactory connectionHandlerFactory,
+      final ObservabilityConfig observabilityConfig,
+      final HttpMetrics metrics,
+      final AccessLogger accessLogger) {
+    // CHECKSTYLE:ON: ParameterNumber
+    this(
+        ServerConfig.builder()
+            .port(port)
+            .acceptTimeoutMs(acceptTimeoutMs)
+            .backlog(backlog)
+            .shutdownTimeoutSeconds(shutdownTimeoutSeconds)
+            .clientReadTimeoutMs(clientReadTimeoutMs)
+            .connectionHandlerFactory(connectionHandlerFactory)
+            .observabilityConfig(observabilityConfig)
+            .metrics(metrics)
+            .accessLogger(accessLogger)
+            .build());
+  }
+
+  WebServer(final ServerConfig config) {
+    this.config = config;
 
     logger.info(
         "Server configured: port={}, acceptTimeout={}ms, backlog={}, clientReadTimeout={}ms, shutdownTimeout={}s",
-        port,
-        acceptTimeoutMs,
-        backlog,
-        clientReadTimeoutMs,
-        shutdownTimeoutSeconds);
+        config.getPort(),
+        config.getAcceptTimeoutMs(),
+        config.getBacklog(),
+        config.getClientReadTimeoutMs(),
+        config.getShutdownTimeoutSeconds());
   }
 
   /**
@@ -224,20 +286,21 @@ public class WebServer {
       // Create and configure server socket
       serverSocket = new ServerSocket();
       serverSocket.setReuseAddress(true); // Allow immediate rebind after restart
-      serverSocket.bind(new InetSocketAddress(port), backlog);
-      serverSocket.setSoTimeout(acceptTimeoutMs); // Enable periodic shutdown checks
+      serverSocket.bind(new InetSocketAddress(config.getPort()), config.getBacklog());
+      serverSocket.setSoTimeout(config.getAcceptTimeoutMs()); // Enable periodic shutdown checks
 
       // Create virtual thread executor
       executor = createExecutor();
 
       running = true;
-      logger.info("Server started on port {}", port);
+      logger.info("Server started on port {}", config.getPort());
     } finally {
       lifecycleLock.unlock();
     }
 
     // Accept loop - runs until shutdown() is called
-    // Use the thread interrupt flag as an additional escape hatch in case the accept loop needs
+    // Use the thread interrupt flag as an additional escape hatch in case the
+    // accept loop needs
     // to abort immediately (e.g. shutdownNow during tests).
     while (running && !Thread.currentThread().isInterrupted()) {
       try {
@@ -247,7 +310,8 @@ public class WebServer {
         logger.debug("Connection accepted from {}", clientSocket.getRemoteSocketAddress());
 
         // Each connection runs on its own virtual thread with its own handler instance
-        executor.submit(() -> handleConnection(clientSocket, connectionHandlerFactory.create()));
+        executor.submit(
+            () -> handleConnection(clientSocket, config.getConnectionHandlerFactory().create()));
 
       } catch (final SocketTimeoutException e) {
         // Expected - no connection within timeout period, continue loop
@@ -283,7 +347,8 @@ public class WebServer {
    */
   private void configureClientSocket(final Socket socket) throws SocketException {
     socket.setTcpNoDelay(true); // Disable Nagle's algorithm for HTTP
-    socket.setSoTimeout(clientReadTimeoutMs); // Bounded read to enforce idle timeouts per request.
+    socket.setSoTimeout(
+        config.getClientReadTimeoutMs()); // Bounded read to enforce idle timeouts per request.
     socket.setKeepAlive(true); // Allow the kernel to reap dead TCP peers on long-lived connections.
   }
 
@@ -353,10 +418,10 @@ public class WebServer {
         executor.shutdown();
 
         // Phase 3: Wait for active connections to complete
-        if (!executor.awaitTermination(shutdownTimeoutSeconds, TimeUnit.SECONDS)) {
+        if (!executor.awaitTermination(config.getShutdownTimeoutSeconds(), TimeUnit.SECONDS)) {
           logger.warn(
               "Graceful shutdown timeout expired after {}s, forcing termination",
-              shutdownTimeoutSeconds);
+              config.getShutdownTimeoutSeconds());
 
           // Force shutdown
           executor.shutdownNow();
@@ -389,7 +454,7 @@ public class WebServer {
    * @return the port number the server is configured to listen on
    */
   public int getPort() {
-    return port;
+    return config.getPort();
   }
 
   /**
@@ -449,7 +514,8 @@ public class WebServer {
 
     @Override
     public void handle(final Socket clientSocket) {
-      // Intentionally left blank: the HTTP pipeline will plug in a richer implementation.
+      // Intentionally left blank: the HTTP pipeline will plug in a richer
+      // implementation.
     }
   }
 
