@@ -13,14 +13,171 @@ A multi-threaded, file-based HTTP/1.1 web server with thread-pooling and keep-al
 ### Build and Run
 
 ```bash
-# Build the project
-./gradlew build
+# Build and run full pipeline (clean, format, test, build)
+make pipeline
 
-# Run in development mode (DEBUG logs to console)
+# Run the server (development mode with DEBUG logging)
+./gradlew run
+
+# Run in production mode (INFO logging to file)
+ENV=production ./gradlew run
+
+# Run with custom port
+SERVER_PORT=9090 ./gradlew run
+```
+
+### Test
+
+```bash
+# Run all tests (151 unit tests)
+./gradlew test
+
+# Run specific test class
+./gradlew test --tests "ch.alejandrogarciahub.webserver.http.HttpRequestTest"
+```
+
+## 🏃 Running the Server
+
+### Method 1: Gradle (Development)
+
+```bash
+# Default configuration (port 8080, DEBUG logs to console)
+./gradlew run
+
+# With custom port
+SERVER_PORT=9090 ./gradlew run
+
+# With custom configuration
+SERVER_PORT=8888 DOCUMENT_ROOT=/path/to/files ./gradlew run
+
+# Production mode (INFO logs to ./logs/application.log)
+ENV=production ./gradlew run
+```
+
+### Method 2: Make Commands
+
+```bash
+# Development mode (console logging, DEBUG level)
 make run-dev
 
-# Run in production mode (INFO logs to file)
+# Production mode (file logging, INFO level)
 make run-prod
+```
+
+### Method 3: Docker Compose (Recommended for Production)
+
+```bash
+# Build and run with docker-compose
+docker-compose up -d
+
+# With custom port
+SERVER_PORT=9090 HOST_PORT=9090 docker-compose up -d
+
+# View logs
+docker-compose logs -f web-server
+
+# Stop
+docker-compose down
+```
+
+### Method 4: Docker Run
+
+```bash
+# Build image
+docker build -t java-web-server:latest .
+
+# Run with default configuration (port 8080)
+docker run -d -p 8080:8080 --name web-server java-web-server:latest
+
+# Run with custom port and configuration
+docker run -d \
+  -p 9090:9090 \
+  -e SERVER_PORT=9090 \
+  -e SERVER_BACKLOG=200 \
+  -e ENV=production \
+  -v $(pwd)/logs:/var/log/webserver \
+  --name web-server \
+  java-web-server:latest
+
+# View logs
+docker logs -f web-server
+
+# Stop and remove
+docker stop web-server && docker rm web-server
+```
+
+### Method 5: JAR File (Direct Execution)
+
+```bash
+# Build the JAR
+./gradlew build
+
+# Run the JAR directly
+java -jar app/build/libs/java-web-server-*.jar
+
+# With custom configuration
+SERVER_PORT=9090 ENV=production java -jar app/build/libs/java-web-server-*.jar
+```
+
+### Verify Server is Running
+
+```bash
+# Test with curl
+curl -I http://localhost:8080/
+
+# Expected response:
+# HTTP/1.1 404 Not Found
+# Content-Type: text/html; charset=UTF-8
+# Content-Length: 153
+# Date: ...
+
+# Create a test file and serve it
+mkdir -p public
+echo "<html><body>Hello World</body></html>" > public/index.html
+curl http://localhost:8080/
+
+# Test keep-alive with multiple requests
+curl -v http://localhost:8080/ http://localhost:8080/
+```
+
+## ⚙️ Configuration
+
+The server can be configured using environment variables:
+
+### Server Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SERVER_PORT` | HTTP listening port | `8080` |
+| `SERVER_ACCEPT_TIMEOUT_MS` | Accept loop timeout (milliseconds) | `5000` |
+| `SERVER_BACKLOG` | Connection queue size | `100` |
+| `SERVER_SHUTDOWN_TIMEOUT_SEC` | Graceful shutdown timeout (seconds) | `30` |
+| `CLIENT_READ_TIMEOUT_MS` | Client socket read timeout (milliseconds) | `15000` |
+| `ENV` | Environment mode (`dev` or `production`) | `dev` |
+| `LOG_DIR` | Log directory (production mode only) | `./logs` |
+
+### HTTP Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HTTP_MAX_REQUEST_LINE_LENGTH` | Maximum request line length (bytes) | `8192` |
+| `HTTP_MAX_HEADER_SIZE` | Maximum total header section size (bytes) | `8192` |
+| `HTTP_MAX_HEADERS_COUNT` | Maximum number of header fields | `100` |
+| `HTTP_MAX_CONTENT_LENGTH` | Maximum request body size (bytes) | `10485760` (10MB) |
+| `DOCUMENT_ROOT` | Document root for serving static files | `./public` |
+
+### Example
+
+```bash
+# Run with custom port
+export SERVER_PORT=9090
+./gradlew run
+
+# Run with custom configuration
+export SERVER_PORT=8888
+export SERVER_BACKLOG=200
+export SERVER_SHUTDOWN_TIMEOUT_SEC=60
+make run-dev
 ```
 
 ## 📋 Development Commands
@@ -39,12 +196,18 @@ make run-prod
 
 # Clean build artifacts
 ./gradlew clean
+
+# Format code
+./gradlew spotlessApply
+
+# Check code style
+./gradlew spotlessCheck checkstyleMain checkstyleTest
 ```
 
 ### Using Make
 
 ```bash
-# Build and run
+# Full pipeline (clean, format, quality check, test, build)
 make pipeline
 
 # Run tests
@@ -55,6 +218,12 @@ make run-dev
 
 # Run in production mode
 make run-prod
+
+# Format code
+make format
+
+# Check code quality
+make quality-check
 
 # Clean
 make clean
@@ -81,17 +250,33 @@ make docker-down
 make docker-clean
 ```
 
-### Manual Docker Commands
+### Docker with Custom Configuration
+
+**Using docker-compose with environment variables:**
+
+```bash
+# Set environment variables
+export SERVER_PORT=9090
+export SERVER_BACKLOG=200
+export HOST_PORT=9090
+
+# Run with custom configuration
+docker-compose up -d
+```
+
+**Using docker run with custom configuration:**
 
 ```bash
 # Build image
 docker build -t java-web-server:latest .
 
-# Run container
-docker run -p 8080:8080 -e ENV=production java-web-server:latest
-
-# Run with docker-compose
-docker-compose up -d
+# Run with custom port and configuration
+docker run -p 9090:9090 \
+  -e SERVER_PORT=9090 \
+  -e SERVER_BACKLOG=200 \
+  -e SERVER_SHUTDOWN_TIMEOUT_SEC=60 \
+  -e ENV=production \
+  java-web-server:latest
 ```
 
 **Docker Image:** ~288MB (Eclipse Temurin 21 JRE)
@@ -106,21 +291,138 @@ java-web-server/
 │   ├── src/
 │   │   ├── main/
 │   │   │   ├── java/ch/alejandrogarciahub/webserver/
-│   │   │   │   └── WebServer.java              # Main application entry point
+│   │   │   │   ├── WebServer.java                          # Main entry point & configuration
+│   │   │   │   ├── ConnectionHandler.java                  # Interface for connection handling
+│   │   │   │   ├── ConnectionHandlerFactory.java           # Factory for thread-safe handlers
+│   │   │   │   ├── http/                                   # HTTP protocol layer
+│   │   │   │   │   ├── HttpRequest.java                    # Immutable HTTP request
+│   │   │   │   │   ├── HttpResponse.java                   # Builder-pattern response
+│   │   │   │   │   ├── HttpHeaders.java                    # Case-insensitive headers
+│   │   │   │   │   ├── HttpMethod.java                     # HTTP methods enum
+│   │   │   │   │   ├── HttpStatus.java                     # HTTP status codes
+│   │   │   │   │   └── HttpVersion.java                    # HTTP version enum
+│   │   │   │   ├── parser/                                 # HTTP parsing (security boundary)
+│   │   │   │   │   ├── HttpRequestParser.java              # RFC 9112 compliant parser
+│   │   │   │   │   └── HttpParseException.java             # Parse errors
+│   │   │   │   └── handler/                                # Request handlers
+│   │   │   │       ├── HttpRequestHandler.java             # Strategy interface
+│   │   │   │       ├── HttpConnectionHandler.java          # Keep-alive connection loop
+│   │   │   │       └── FileServerHandler.java              # Static file serving
 │   │   │   └── resources/
-│   │   │       ├── logback.xml                 # Default logging config
-│   │   │       ├── logback-dev.xml             # Development logging (console, DEBUG)
-│   │   │       └── logback-production.xml      # Production logging (file, INFO)
+│   │   │       ├── logback.xml                             # Default logging config
+│   │   │       ├── logback-dev.xml                         # Development logging
+│   │   │       └── logback-production.xml                  # Production logging
 │   │   └── test/
-│   │       ├── java/                           # Unit tests
-│   │       └── resources/                      # Test resources
-│   └── build.gradle.kts                        # App module build configuration
-├── gradle/                                     # Gradle wrapper
-├── Dockerfile                                  # Multi-stage Docker build
-├── docker-compose.yml                          # Docker orchestration
-├── makefile                                    # Convenient build commands
-├── settings.gradle.kts                         # Gradle settings
-└── gradle.properties                           # Gradle properties
+│   │       └── java/                                       # 151 unit tests
+│   │           ├── http/                                   # HTTP layer tests (90 tests)
+│   │           ├── parser/                                 # Parser tests (36 tests)
+│   │           └── handler/                                # Handler tests (35 tests)
+│   └── build.gradle.kts                                    # Build configuration
+├── config/
+│   └── checkstyle/checkstyle.xml                           # Code style rules
+├── Dockerfile                                              # Multi-stage Docker build
+├── docker-compose.yml                                      # Docker orchestration
+├── makefile                                                # Build commands
+└── public/                                                 # Document root (default)
+```
+
+## 👨‍💻 Developer Guide
+
+### Where to Start Reading the Code
+
+**1. Entry Point & Architecture** (`WebServer.java:175`)
+- Virtual thread executor setup
+- Environment variable configuration (centralized)
+- Factory pattern for thread-safe connection handlers
+- Graceful shutdown handling
+
+**2. Connection Lifecycle** (`HttpConnectionHandler.java:40`)
+- Keep-alive loop implementation
+- HTTP/1.1 vs HTTP/1.0 persistence logic
+- Error handling and timeout management
+- Handler directive priority over client preferences
+
+**3. HTTP Parsing** (`HttpRequestParser.java:63`)
+- **Security critical**: DoS prevention via configurable limits
+- RFC 9112 compliant request line and header parsing
+- Graceful EOF handling for HTTP pipelining
+- Validation: Host header required for HTTP/1.1
+
+**4. Request/Response Model**
+- `HttpRequest.java:28` - Immutable request with keep-alive logic
+- `HttpResponse.java:29` - Builder pattern with lazy streaming
+- `HttpHeaders.java:17` - Case-insensitive header storage (RFC 9110)
+
+**5. File Serving** (`FileServerHandler.java:42`)
+- **Security critical**: Path traversal prevention
+- MIME type detection with fallback
+- Lazy file streaming to prevent OOM
+- Directory index support (index.html)
+
+### Key Design Patterns
+
+**Factory Pattern** - Thread safety via per-connection handler instances
+```java
+ConnectionHandlerFactory factory = () -> {
+    HttpRequestParser parser = new HttpRequestParser(...);
+    return new HttpConnectionHandler(fileHandler, parser, timeout);
+};
+```
+
+**Builder Pattern** - Fluent HTTP response construction
+```java
+HttpResponse response = new HttpResponse()
+    .status(HttpStatus.OK)
+    .contentType("text/html")
+    .keepAlive(true)
+    .body("content");
+```
+
+**Strategy Pattern** - Pluggable request handlers
+```java
+interface HttpRequestHandler {
+    HttpResponse handle(HttpRequest request) throws IOException;
+}
+```
+
+**Lazy Evaluation** - Streaming without loading into memory
+```java
+response.setBodySupplier(() -> Files.newInputStream(file));
+```
+
+### Critical Security Boundaries
+
+**1. Parser Limits** (`HttpRequestParser.java:63`)
+- Request line: 8KB max (prevents header injection)
+- Headers section: 8KB max (prevents DoS)
+- Header count: 100 max (prevents hash collision attacks)
+- Body size: 10MB max (prevents OOM)
+
+**2. Path Traversal Prevention** (`FileServerHandler.java:146`)
+```java
+Path resolved = documentRoot.resolve(cleanPath).normalize();
+if (!resolved.startsWith(documentRoot)) {
+    return null; // Attack detected
+}
+```
+
+**3. XSS Prevention** (`HttpResponse.java:243`)
+- HTML entity escaping in error messages
+- Prevents reflected XSS in error pages
+
+### Testing Philosophy
+
+**All 151 tests follow**: *"A test that does not find bugs is a failed test"*
+
+Tests focus on:
+- **Security bugs**: Path traversal, DoS, XSS, protocol violations
+- **Connection bugs**: Leaks, premature close, version confusion
+- **Integration bugs**: Response mixing, parser invocation count, EOF handling
+
+Run tests:
+```bash
+./gradlew test  # All 151 tests
+./gradlew test --tests "*.handler.*"  # Handler layer only
 ```
 
 ## 🔧 Logging Configuration
@@ -207,16 +509,16 @@ testImplementation("org.assertj:assertj-core:3.24.2")
 
 ## 🎯 Project Goals
 
-- ✅ Multi-threaded request handling
-- ✅ Thread pooling for efficient resource management
-- ✅ HTTP/1.1 keep-alive support
-- ✅ File-based static content serving
+- ✅ Multi-threaded request handling (Java 21 virtual threads)
 - ✅ JSON structured logging
 - ✅ Docker containerization
-- ⏳ HTTP request parsing (TODO)
-- ⏳ HTTP response generation (TODO)
-- ⏳ MIME type detection (TODO)
-- ⏳ Connection management (TODO)
+- ✅ HTTP/1.1 request parsing
+- ✅ HTTP/1.1 response generation
+- ✅ Static file serving
+- ✅ HTTP/1.1 keep-alive support
+- ✅ MIME type detection
+- ✅ GET and HEAD methods
+- ✅ Thread-safe connection handling (factory pattern)
 
 ## 📖 Additional Documentation
 

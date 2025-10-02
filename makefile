@@ -1,9 +1,5 @@
 .PHONY: pipeline clean test run-dev run-prod format format-check lint quality-check quality-fix docker-build docker-run docker-up docker-down docker-logs docker-clean
 
-pipeline:
-	./gradlew build
-	./gradlew run
-
 clean:
 	./gradlew clean
 
@@ -51,3 +47,10 @@ docker-logs:
 docker-clean:
 	docker-compose down -v
 	docker rmi java-web-server:latest || true
+
+pipeline:
+	make clean
+	make format
+	make quality-check
+	make test
+	./gradlew build

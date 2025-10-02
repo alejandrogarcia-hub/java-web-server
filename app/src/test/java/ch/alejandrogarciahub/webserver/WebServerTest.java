@@ -3,14 +3,407 @@
  */
 package ch.alejandrogarciahub.webserver;
 
-import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+import java.io.IOException;
+import java.net.Socket;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
+/**
+ * Unit tests for WebServer virtual thread-based HTTP server.
+ *
+ * <p>Tests cover:
+ *
+ * <ul>
+ *   <li>Server lifecycle (start, shutdown, state management)
+ *   <li>Connection acceptance and concurrency
+ *   <li>Graceful shutdown behavior
+ *   <li>Error handling and edge cases
+ * </ul>
+ */
 class WebServerTest {
+
+  private WebServer server;
+  private Thread serverThread;
+  private int testPort;
+
+  @AfterEach
+  void cleanup() throws Exception {
+    if (server != null && server.isRunning()) {
+      server.shutdown();
+    }
+    if (serverThread != null && serverThread.isAlive()) {
+      serverThread.join(2000);
+    }
+  }
+
+  /**
+   * Helper method to start server with default test configuration.
+   *
+   * @param shutdownTimeoutSeconds the shutdown timeout for this test
+   */
+  private void startTestServer(int shutdownTimeoutSeconds) throws Exception {
+    startTestServer(shutdownTimeoutSeconds, new NoopConnectionHandler());
+  }
+
+  private void startTestServer(int shutdownTimeoutSeconds, ConnectionHandler handler)
+      throws Exception {
+    testPort = allocateEphemeralPort();
+    server = new WebServer(testPort, 1000, 50, shutdownTimeoutSeconds, 15000, () -> handler);
+    startServerInBackground();
+    waitForServerStartup();
+  }
+
+  /**
+   * Tests that the server starts successfully and binds to the configured port.
+   *
+   * <p>Verifies:
+   *
+   * <ul>
+   *   <li>Server state transitions to running
+   *   <li>Port is correctly configured
+   *   <li>Server can accept connections on the bound port
+   * </ul>
+   */
   @Test
-  void appHasAGreeting() {
-    final WebServer classUnderTest = new WebServer();
-    assertNotNull(classUnderTest.getGreeting(), "app should have a greeting");
+  @Timeout(10)
+  void testServerStartsAndBindsToPort() throws Exception {
+    // Arrange & Act
+    startTestServer(5);
+
+    // Assert
+    assertThat(server.isRunning()).isTrue();
+    assertThat(server.getPort()).isEqualTo(testPort);
+
+    // Verify port is bound by attempting connection
+    try (Socket testSocket = new Socket("localhost", server.getPort())) {
+      assertThat(testSocket.isConnected()).isTrue();
+    }
+  }
+
+  /**
+   * Tests that the server accepts a single client connection.
+   *
+   * <p>Verifies:
+   *
+   * <ul>
+   *   <li>Client can successfully connect to server
+   *   <li>Connection is accepted without errors
+   * </ul>
+   */
+  @Test
+  @Timeout(10)
+  void testServerAcceptsConnection() throws Exception {
+    // Arrange
+    startTestServer(5);
+
+    // Act - Connect client
+    try (Socket client = new Socket("localhost", server.getPort())) {
+      // Assert
+      assertThat(client.isConnected()).isTrue();
+      assertThat(client.isClosed()).isFalse();
+    }
+  }
+
+  /**
+   * Tests that the server handles multiple concurrent connections successfully.
+   *
+   * <p>Verifies:
+   *
+   * <ul>
+   *   <li>100 concurrent clients can all connect simultaneously
+   *   <li>All connections are accepted without errors
+   *   <li>Virtual threads handle concurrency efficiently
+   * </ul>
+   */
+  @Test
+  @Timeout(15)
+  void testMultipleConcurrentConnections() throws Exception {
+    // Arrange
+    testPort = allocateEphemeralPort();
+    server = new WebServer(testPort, 1000, 200, 10, 15000, () -> new NoopConnectionHandler());
+    startServerInBackground();
+    waitForServerStartup();
+
+    final int connectionCount = 100;
+    final CountDownLatch connectLatch = new CountDownLatch(connectionCount);
+    final AtomicInteger successfulConnections = new AtomicInteger(0);
+    final List<Socket> sockets = new ArrayList<>();
+
+    final ExecutorService clientExecutor = Executors.newFixedThreadPool(20);
+
+    try {
+      // Act - Create 100 concurrent connections
+      for (int i = 0; i < connectionCount; i++) {
+        clientExecutor.submit(
+            () -> {
+              try {
+                final Socket socket = new Socket("localhost", server.getPort());
+                synchronized (sockets) {
+                  sockets.add(socket);
+                }
+                successfulConnections.incrementAndGet();
+                connectLatch.countDown();
+              } catch (final IOException e) {
+                connectLatch.countDown();
+              }
+            });
+      }
+
+      // Wait for all connections
+      assertThat(connectLatch.await(10, TimeUnit.SECONDS)).isTrue();
+
+      // Assert
+      assertThat(successfulConnections.get()).isEqualTo(connectionCount);
+
+    } finally {
+      // Cleanup
+      clientExecutor.shutdown();
+      try {
+        clientExecutor.awaitTermination(5, TimeUnit.SECONDS);
+      } catch (final InterruptedException interruptedException) {
+        Thread.currentThread().interrupt();
+      }
+      synchronized (sockets) {
+        for (final Socket socket : sockets) {
+          try {
+            socket.close();
+          } catch (final IOException e) {
+            // Ignore
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * Tests graceful shutdown with active connections.
+   *
+   * <p>Verifies:
+   *
+   * <ul>
+   *   <li>Server stops accepting new connections after shutdown
+   *   <li>Active connections are allowed to complete
+   *   <li>Server state transitions to not running
+   * </ul>
+   */
+  @Test
+  @Timeout(15)
+  void testGracefulShutdown() throws Exception {
+    // Arrange
+    startTestServer(10);
+
+    try (Socket activeConnection = new Socket("localhost", server.getPort())) {
+      // Act - Shutdown server
+      final long shutdownStart = System.currentTimeMillis();
+      server.shutdown();
+      final long shutdownDuration = System.currentTimeMillis() - shutdownStart;
+
+      // Assert
+      assertThat(server.isRunning()).isFalse();
+      assertThat(shutdownDuration)
+          .isLessThan(2000); // Should complete quickly since connection closes
+
+      // Verify cannot connect after shutdown
+      assertThatThrownBy(() -> new Socket("localhost", server.getPort()))
+          .isInstanceOf(IOException.class);
+    }
+  }
+
+  /**
+   * Tests forced shutdown when connections exceed grace period.
+   *
+   * <p>Verifies:
+   *
+   * <ul>
+   *   <li>Shutdown respects timeout configuration
+   *   <li>Connections are forcefully terminated after timeout
+   *   <li>Shutdown completes within expected time frame
+   * </ul>
+   */
+  @Test
+  @Timeout(20)
+  void testShutdownTimeout() throws Exception {
+    // Arrange
+    final CountDownLatch connectionStarted = new CountDownLatch(1);
+    final CountDownLatch releaseConnection = new CountDownLatch(1);
+    final ConnectionHandler blockingHandler =
+        socket -> {
+          connectionStarted.countDown();
+          // Hold the connection open to force the server into the forced-shutdown path.
+          releaseConnection.await();
+        };
+
+    startTestServer(2, blockingHandler); // Short timeout for testing
+
+    try (Socket longLivedConnection = new Socket("localhost", server.getPort())) {
+      assertThat(connectionStarted.await(2, TimeUnit.SECONDS)).isTrue();
+
+      // Act - Shutdown with 2 second timeout
+      final long shutdownStart = System.currentTimeMillis();
+      server.shutdown();
+      final long shutdownDuration = System.currentTimeMillis() - shutdownStart;
+
+      // Assert - Should complete within timeout + buffer (2s timeout + 10s forced shutdown wait)
+      assertThat(shutdownDuration).isBetween(2000L, 13000L);
+      assertThat(server.isRunning()).isFalse();
+    } finally {
+      releaseConnection.countDown();
+    }
+  }
+
+  /**
+   * Tests that starting the server twice throws IllegalStateException.
+   *
+   * <p>Verifies:
+   *
+   * <ul>
+   *   <li>Server prevents double-start
+   *   <li>Appropriate exception is thrown
+   * </ul>
+   */
+  @Test
+  @Timeout(10)
+  void testCannotStartTwice() throws Exception {
+    // Arrange
+    startTestServer(5);
+
+    // Act & Assert
+    assertThatThrownBy(() -> server.start()).isInstanceOf(IllegalStateException.class);
+  }
+
+  /**
+   * Tests that shutdown responds within the accept timeout period.
+   *
+   * <p>Verifies:
+   *
+   * <ul>
+   *   <li>Accept timeout enables responsive shutdown
+   *   <li>Shutdown completes quickly even when no connections are active
+   * </ul>
+   */
+  @Test
+  @Timeout(10)
+  void testAcceptTimeoutAllowsResponsiveShutdown() throws Exception {
+    // Arrange
+    testPort = allocateEphemeralPort();
+    server = new WebServer(testPort, 2000, 50, 5, 15000, () -> new NoopConnectionHandler());
+    startServerInBackground();
+    waitForServerStartup();
+
+    // Act - Shutdown immediately (no active connections)
+    final long shutdownStart = System.currentTimeMillis();
+    server.shutdown();
+    final long shutdownDuration = System.currentTimeMillis() - shutdownStart;
+
+    // Assert - Should complete within accept timeout window
+    assertThat(shutdownDuration).isLessThan(3000);
+    assertThat(server.isRunning()).isFalse();
+  }
+
+  /**
+   * Tests that calling shutdown on a non-running server is safe.
+   *
+   * <p>Verifies:
+   *
+   * <ul>
+   *   <li>Shutdown on non-running server doesn't throw exceptions
+   *   <li>Server remains in not-running state
+   * </ul>
+   */
+  @Test
+  @Timeout(5)
+  void testShutdownWhenNotRunning() throws Exception {
+    // Arrange - Server created but not started
+    testPort = allocateEphemeralPort();
+    server = new WebServer(testPort, 1000, 50, 5, 15000, () -> new NoopConnectionHandler());
+
+    // Act
+    server.shutdown();
+
+    // Assert - Should complete without error
+    assertThat(server.isRunning()).isFalse();
+  }
+
+  /**
+   * Tests environment variable parsing with valid integer values.
+   *
+   * <p>Verifies:
+   *
+   * <ul>
+   *   <li>Server correctly reads port configuration
+   *   <li>Constructor with explicit parameters works correctly
+   * </ul>
+   */
+  @Test
+  void testConfigurationWithValidParameters() {
+    // Arrange & Act
+    server = new WebServer(9090, 3000, 150, 45);
+
+    // Assert
+    assertThat(server.getPort()).isEqualTo(9090);
+    assertThat(server.isRunning()).isFalse();
+  }
+
+  // Helper method to start server in background thread
+  private void startServerInBackground() {
+    serverThread =
+        new Thread(
+            () -> {
+              try {
+                server.start();
+              } catch (final IOException e) {
+                throw new RuntimeException(e);
+              }
+            });
+    serverThread.start();
+  }
+
+  /**
+   * Allocates an ephemeral port for testing.
+   *
+   * <p>Note: There is a minor race condition where another process could grab the port between when
+   * we release it and when the server binds to it. This is acceptable for testing as the likelihood
+   * is extremely low and failures would be obvious (bind exception).
+   *
+   * @return an available port number
+   * @throws IOException if unable to allocate a port
+   */
+  private int allocateEphemeralPort() throws IOException {
+    try (java.net.ServerSocket socket = new java.net.ServerSocket(0)) {
+      socket.setReuseAddress(true);
+      return socket.getLocalPort();
+    }
+  }
+
+  private void waitForServerStartup() throws InterruptedException {
+    int attempts = 0;
+    while (attempts < 20) {
+      if (server.isRunning()) {
+        return;
+      }
+      // Poll in short bursts instead of sleeping for a fixed half second to keep tests snappy.
+      TimeUnit.MILLISECONDS.sleep(50);
+      attempts++;
+    }
+    throw new IllegalStateException("Server did not signal running state in time");
+  }
+
+  private static final class NoopConnectionHandler implements ConnectionHandler {
+
+    @Override
+    public void handle(final Socket clientSocket) {
+      // No-op for tests that just need a connected socket.
+    }
   }
 }
