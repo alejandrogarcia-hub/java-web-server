@@ -94,6 +94,8 @@ class HttpResponseTest {
             .body("test");
 
     assertThat(response).isNotNull();
+    assertThat(response.getStatus()).isEqualTo(HttpStatus.OK);
+    assertThat(response.getVersion()).isEqualTo(HttpVersion.HTTP_1_1);
   }
 
   @Test
@@ -130,6 +132,7 @@ class HttpResponseTest {
 
     final HttpHeaders headers = getHeaders(response);
     assertThat(headers.get("Content-Length")).isEqualTo("9");
+    assertThat(response.getBytesWritten()).isEqualTo(9);
   }
 
   @Test

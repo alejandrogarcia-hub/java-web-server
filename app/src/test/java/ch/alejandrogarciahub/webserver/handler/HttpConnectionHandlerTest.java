@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoMoreInteractions;
 import static org.mockito.Mockito.when;
 
 import ch.alejandrogarciahub.webserver.http.HttpMethod;
@@ -11,6 +12,9 @@ import ch.alejandrogarciahub.webserver.http.HttpRequest;
 import ch.alejandrogarciahub.webserver.http.HttpResponse;
 import ch.alejandrogarciahub.webserver.http.HttpStatus;
 import ch.alejandrogarciahub.webserver.http.HttpVersion;
+import ch.alejandrogarciahub.webserver.observability.AccessLogger;
+import ch.alejandrogarciahub.webserver.observability.HttpMetrics;
+import ch.alejandrogarciahub.webserver.observability.ObservabilityConfig;
 import ch.alejandrogarciahub.webserver.parser.HttpParseException;
 import ch.alejandrogarciahub.webserver.parser.HttpRequestParser;
 import java.io.ByteArrayInputStream;
@@ -21,6 +25,7 @@ import java.net.Socket;
 import java.net.SocketTimeoutException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mockito;
 
 /**
@@ -36,12 +41,20 @@ class HttpConnectionHandlerTest {
   private HttpConnectionHandler handler;
   private Socket mockSocket;
   private ByteArrayOutputStream outputStream;
+  private HttpMetrics mockMetrics;
+  private ObservabilityConfig observabilityConfig;
+  private AccessLogger accessLogger;
 
   @BeforeEach
   void setup() throws IOException {
     mockRequestHandler = mock(HttpRequestHandler.class);
     mockParser = mock(HttpRequestParser.class);
-    handler = new HttpConnectionHandler(mockRequestHandler, mockParser, 5000);
+    mockMetrics = mock(HttpMetrics.class);
+    observabilityConfig = new ObservabilityConfig(true, true, -1, "/metrics");
+    accessLogger = mock(AccessLogger.class);
+    handler =
+        new HttpConnectionHandler(
+            mockRequestHandler, mockParser, 5000, mockMetrics, observabilityConfig, accessLogger);
 
     mockSocket = mock(Socket.class);
     outputStream = new ByteArrayOutputStream();
@@ -67,6 +80,14 @@ class HttpConnectionHandlerTest {
     handler.handle(mockSocket);
 
     verify(mockSocket).close();
+    verify(mockMetrics).connectionOpened();
+    verify(mockMetrics).connectionClosed();
+    verify(mockMetrics)
+        .recordRequest(
+            Mockito.eq(HttpMethod.GET),
+            Mockito.eq(HttpStatus.OK),
+            Mockito.anyLong(),
+            Mockito.anyLong());
   }
 
   @Test
@@ -90,17 +111,23 @@ class HttpConnectionHandlerTest {
 
     verify(mockRequestHandler, Mockito.times(3)).handle(any());
     verify(mockSocket).close();
+    verify(mockMetrics, Mockito.atLeastOnce())
+        .recordRequest(any(), any(), Mockito.anyLong(), Mockito.anyLong());
   }
 
   @Test
   void shouldCloseOnGracefulEof() throws IOException {
-    // Parser returns null on graceful EOF
+    // Parser returns null on graceful EOF (client closed connection cleanly)
+    // This is not an error - no request was made, so no metrics should be recorded
     when(mockSocket.getInputStream()).thenReturn(new ByteArrayInputStream(new byte[0]));
     when(mockParser.parse(any(InputStream.class))).thenReturn(null);
 
     handler.handle(mockSocket);
 
     verify(mockSocket).close();
+    verify(mockMetrics).connectionOpened();
+    verify(mockMetrics).connectionClosed();
+    verifyNoMoreInteractions(accessLogger);
   }
 
   @Test
@@ -117,6 +144,16 @@ class HttpConnectionHandlerTest {
     verify(mockSocket).close();
     final String output = outputStream.toString();
     assertThat(output).contains("400");
+    final ArgumentCaptor<AccessLogger.Entry> logCaptor =
+        ArgumentCaptor.forClass(AccessLogger.Entry.class);
+    verify(accessLogger).log(logCaptor.capture());
+    assertThat(logCaptor.getValue().status()).isEqualTo(HttpStatus.BAD_REQUEST.getCode());
+    verify(mockMetrics)
+        .recordRequest(
+            Mockito.eq(null),
+            Mockito.eq(HttpStatus.BAD_REQUEST),
+            Mockito.anyLong(),
+            Mockito.anyLong());
   }
 
   @Test
@@ -127,6 +164,17 @@ class HttpConnectionHandlerTest {
     handler.handle(mockSocket);
 
     verify(mockSocket).close();
+    final ArgumentCaptor<AccessLogger.Entry> logCaptor =
+        ArgumentCaptor.forClass(AccessLogger.Entry.class);
+    verify(accessLogger).log(logCaptor.capture());
+    assertThat(logCaptor.getValue().status()).isEqualTo(HttpStatus.REQUEST_TIMEOUT.getCode());
+    assertThat(logCaptor.getValue().durationMillis()).isGreaterThanOrEqualTo(0L);
+    verify(mockMetrics)
+        .recordRequest(
+            Mockito.eq(null),
+            Mockito.eq(HttpStatus.REQUEST_TIMEOUT),
+            Mockito.anyLong(),
+            Mockito.eq(0L));
   }
 
   @Test
@@ -139,6 +187,16 @@ class HttpConnectionHandlerTest {
     verify(mockSocket).close();
     final String output = outputStream.toString();
     assertThat(output).contains("500");
+    final ArgumentCaptor<AccessLogger.Entry> logCaptor =
+        ArgumentCaptor.forClass(AccessLogger.Entry.class);
+    verify(accessLogger).log(logCaptor.capture());
+    assertThat(logCaptor.getValue().status()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.getCode());
+    verify(mockMetrics)
+        .recordRequest(
+            Mockito.eq(null),
+            Mockito.eq(HttpStatus.INTERNAL_SERVER_ERROR),
+            Mockito.anyLong(),
+            Mockito.anyLong());
   }
 
   @Test
@@ -151,6 +209,10 @@ class HttpConnectionHandlerTest {
     verify(mockSocket).close();
     final String output = outputStream.toString();
     assertThat(output).contains("500");
+    final ArgumentCaptor<AccessLogger.Entry> logCaptor =
+        ArgumentCaptor.forClass(AccessLogger.Entry.class);
+    verify(accessLogger).log(logCaptor.capture());
+    assertThat(logCaptor.getValue().status()).isEqualTo(HttpStatus.INTERNAL_SERVER_ERROR.getCode());
   }
 
   // HEAD Method Support
@@ -261,6 +323,8 @@ class HttpConnectionHandlerTest {
     when(request.getPath()).thenReturn(path);
     when(request.getVersion()).thenReturn(version);
     when(request.isKeepAlive()).thenReturn(keepAlive);
+    when(request.getQueryParams()).thenReturn(java.util.Collections.emptyMap());
+    when(request.getHeader("X-Request-Id")).thenReturn(null);
     return request;
   }
 }

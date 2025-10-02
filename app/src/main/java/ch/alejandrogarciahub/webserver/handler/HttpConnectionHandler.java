@@ -1,16 +1,24 @@
 package ch.alejandrogarciahub.webserver.handler;
 
 import ch.alejandrogarciahub.webserver.ConnectionHandler;
+import ch.alejandrogarciahub.webserver.http.HttpMethod;
 import ch.alejandrogarciahub.webserver.http.HttpRequest;
 import ch.alejandrogarciahub.webserver.http.HttpResponse;
+import ch.alejandrogarciahub.webserver.http.HttpStatus;
+import ch.alejandrogarciahub.webserver.observability.AccessLogger;
+import ch.alejandrogarciahub.webserver.observability.HttpMetrics;
+import ch.alejandrogarciahub.webserver.observability.ObservabilityConfig;
 import ch.alejandrogarciahub.webserver.parser.HttpParseException;
 import ch.alejandrogarciahub.webserver.parser.HttpRequestParser;
 import java.io.BufferedInputStream;
 import java.io.IOException;
 import java.net.Socket;
 import java.net.SocketTimeoutException;
+import java.util.UUID;
+import java.util.stream.Collectors;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 
 /**
  * HTTP connection handler with keep-alive support.
@@ -43,6 +51,9 @@ public final class HttpConnectionHandler implements ConnectionHandler {
   private final HttpRequestHandler requestHandler;
   private final HttpRequestParser parser;
   private final int clientReadTimeoutMs;
+  private final HttpMetrics metrics;
+  private final ObservabilityConfig observabilityConfig;
+  private final AccessLogger accessLogger;
 
   /**
    * Constructs an HttpConnectionHandler with the given request handler, parser, and timeout.
@@ -54,10 +65,17 @@ public final class HttpConnectionHandler implements ConnectionHandler {
   public HttpConnectionHandler(
       final HttpRequestHandler requestHandler,
       final HttpRequestParser parser,
-      final int clientReadTimeoutMs) {
+      final int clientReadTimeoutMs,
+      final HttpMetrics metrics,
+      final ObservabilityConfig observabilityConfig,
+      final AccessLogger accessLogger) {
     this.requestHandler = requestHandler;
     this.parser = parser;
     this.clientReadTimeoutMs = clientReadTimeoutMs;
+    this.metrics = metrics;
+    this.observabilityConfig =
+        observabilityConfig != null ? observabilityConfig : ObservabilityConfig.fromEnvironment();
+    this.accessLogger = accessLogger;
   }
 
   /**
@@ -90,19 +108,34 @@ public final class HttpConnectionHandler implements ConnectionHandler {
       final var output = clientSocket.getOutputStream();
 
       boolean keepAlive = true;
+      if (metricsEnabled()) {
+        metrics.connectionOpened();
+      }
 
       // Keep-alive loop: handle multiple requests on same connection
       while (keepAlive && !clientSocket.isClosed()) {
+        final long startNanos = System.nanoTime();
+        // WHY declare as null: Needed in catch blocks for observability; null request = parse fail
+        HttpRequest request = null;
+        HttpResponse response = null;
+        // WHY seed ID before parsing: Correlates logs/metrics even when parsing fails. Replaced
+        // with client's X-Request-Id header after successful parse (see ensureRequestId below).
+        String requestId = UUID.randomUUID().toString();
+        MDC.put("request_id", requestId);
+
         try {
-          // Parse the HTTP request
-          // Graceful EOF: parser.parse() returns null when client closes connection cleanly
-          // (EOF before next request starts). This is normal for HTTP pipelining end.
-          final HttpRequest request = parser.parse(input);
+          // Parse the HTTP request. Graceful EOF: parser.parse() returns null when the
+          // client closed the connection cleanly (EOF before next request). In that case
+          // we exit the keep-alive loop without treating it as an error.
+          request = parser.parse(input);
           if (request == null) {
-            // Client closed the socket without a further request; end keep-alive quietly.
             keepAlive = false;
             break;
           }
+
+          // WHY replace ID: Prefer client's X-Request-Id for distributed tracing across services
+          requestId = ensureRequestId(request, requestId);
+          MDC.put("request_id", requestId);
 
           logger.info(
               "{} {} {} from {}",
@@ -112,7 +145,7 @@ public final class HttpConnectionHandler implements ConnectionHandler {
               clientAddress);
 
           // Handle the request
-          final HttpResponse response = requestHandler.handle(request);
+          response = requestHandler.handle(request);
 
           // Set response version to match request version
           response.version(request.getVersion());
@@ -130,38 +163,56 @@ public final class HttpConnectionHandler implements ConnectionHandler {
           }
           keepAlive = finalKeepAlive;
 
-          // Write response based on method
-          if (request.getMethod().name().equals("HEAD")) {
+          // WHY different write for HEAD: RFC 9110 requires same headers as GET but no body
+          if (request.getMethod() == HttpMethod.HEAD) {
             response.writeHeadersOnly(output);
           } else {
             response.writeTo(output);
           }
 
+          final long durationNanos = System.nanoTime() - startNanos;
           logger.debug("Response: {} - Keep-Alive: {}", response, keepAlive);
+          // WHY here: Emit metrics/logs after write; duration covers parse + handle + write
+          finalizeObservability(clientAddress, request, response, durationNanos, requestId);
 
         } catch (final HttpParseException e) {
-          // HTTP parsing error - send error response and close connection
+          // WHY close: Malformed request = unclear HTTP state (potential attack)
           logger.warn("Parse error from {}: {}", clientAddress, e.getMessage());
-          writeResponse(
-              output, clientAddress, HttpResponse.errorResponse(e.getStatus(), e.getMessage()));
-          keepAlive = false; // Close connection on parse errors
+          response = HttpResponse.errorResponse(e.getStatus(), e.getMessage());
+          writeResponse(output, clientAddress, response);
+          keepAlive = false;
+          final long durationNanos = System.nanoTime() - startNanos;
+          // WHY null request: Parsing failed, access logs use "-" placeholders
+          finalizeObservability(clientAddress, null, response, durationNanos, requestId);
 
         } catch (final SocketTimeoutException e) {
-          // Client read timeout - close connection
+          // WHY synthetic: Can't write to dead socket, but still need metrics/logs
           logger.debug("Read timeout from {}", clientAddress);
           keepAlive = false;
+          response = syntheticResponse(HttpStatus.REQUEST_TIMEOUT);
+          final long durationNanos = System.nanoTime() - startNanos;
+          finalizeObservability(clientAddress, null, response, durationNanos, requestId);
 
         } catch (final IOException e) {
-          // I/O error during request/response - send 500 and close connection
+          // WHY pass request: I/O error during handle/write, request may exist if parse succeeded
           logger.warn("I/O error from {}: {}", clientAddress, e.getMessage());
-          writeResponse(output, clientAddress, HttpResponse.internalServerError());
+          response = HttpResponse.internalServerError();
+          writeResponse(output, clientAddress, response);
           keepAlive = false;
+          final long durationNanos = System.nanoTime() - startNanos;
+          finalizeObservability(clientAddress, request, response, durationNanos, requestId);
 
         } catch (final Exception e) {
-          // Unexpected error - send 500 and close connection
+          // WHY catch all: Prevents thread death from unexpected bugs; still emit observability
           logger.error("Unexpected error handling request from {}", clientAddress, e);
-          writeResponse(output, clientAddress, HttpResponse.internalServerError());
+          response = HttpResponse.internalServerError();
+          writeResponse(output, clientAddress, response);
           keepAlive = false;
+          final long durationNanos = System.nanoTime() - startNanos;
+          finalizeObservability(clientAddress, request, response, durationNanos, requestId);
+
+        } finally {
+          MDC.remove("request_id");
         }
       }
 
@@ -171,6 +222,10 @@ public final class HttpConnectionHandler implements ConnectionHandler {
       logger.error("Error setting up connection from {}: {}", clientAddress, e.getMessage());
 
     } finally {
+      MDC.remove("request_id");
+      if (metricsEnabled()) {
+        metrics.connectionClosed();
+      }
       closeSocket(clientSocket, clientAddress);
     }
   }
@@ -206,5 +261,161 @@ public final class HttpConnectionHandler implements ConnectionHandler {
     } catch (final IOException e) {
       logger.error("Error closing socket for {}: {}", clientAddress, e.getMessage());
     }
+  }
+
+  private boolean metricsEnabled() {
+    return metrics != null && observabilityConfig.isMetricsEnabled();
+  }
+
+  /**
+   * Ensures every request has a unique identifier for tracing.
+   *
+   * <p>WHY this pattern: We generate a UUID before parsing (for error correlation), but prefer
+   * client-provided X-Request-Id if present (for distributed tracing across services). This method
+   * safely handles null requests (parsing failures) by returning the fallback UUID.
+   *
+   * @param request the parsed HTTP request (may be null if parsing failed)
+   * @param fallbackId the pre-generated UUID to use if request is null or lacks X-Request-Id
+   * @return the final request ID to use for observability
+   */
+  private String ensureRequestId(final HttpRequest request, final String fallbackId) {
+    if (request == null) {
+      return fallbackId;
+    }
+    final String header = request.getHeader("X-Request-Id");
+    if (header != null && !header.isBlank()) {
+      return header;
+    }
+    return fallbackId;
+  }
+
+  /**
+   * Emits logging and metrics for a completed request lifecycle (success or failure).
+   *
+   * <p>WHY centralized method: Previously, observability logic was duplicated across success and
+   * error handlers (5 different locations). Centralizing ensures consistent observability coverage
+   * for all code paths and makes it easier to add new observability features (e.g., distributed
+   * tracing spans).
+   *
+   * <p>WHY accept null request: Parse errors and timeouts don't have a valid HttpRequest object.
+   * Access logs handle this by using "-" placeholders; metrics record null method to track
+   * failures.
+   *
+   * @param request the HTTP request (null if parsing failed)
+   * @param response the HTTP response (must not be null)
+   */
+  private void finalizeObservability(
+      final String clientAddress,
+      final HttpRequest request,
+      final HttpResponse response,
+      final long durationNanos,
+      final String requestId) {
+    if (response == null) {
+      return;
+    }
+    emitAccessLog(clientAddress, request, response, durationNanos, requestId);
+    updateMetrics(request, response, durationNanos);
+  }
+
+  /**
+   * Builds a lightweight response structure used solely for logging/metrics when no payload is
+   * emitted (e.g. socket timeouts).
+   *
+   * <p>WHY synthetic responses: Some failures (socket timeout, client disconnect) prevent us from
+   * writing a response back to the client. But we still need to record the event in logs/metrics
+   * for monitoring. This creates a minimal HttpResponse with the status code and metadata needed
+   * for observability, without attempting network I/O.
+   *
+   * <p>WHY bodyLength(0L): Indicates no bytes were sent (failure before response write).
+   *
+   * @param status the HTTP status code representing the failure type
+   * @return a non-serialized response object for observability only
+   */
+  private HttpResponse syntheticResponse(final HttpStatus status) {
+    return new HttpResponse().status(status).keepAlive(false).bodyLength(0L);
+  }
+
+  private void emitAccessLog(
+      final String clientAddress,
+      final HttpRequest request,
+      final HttpResponse response,
+      final long durationNanos,
+      final String requestId) {
+    if (accessLogger == null || !observabilityConfig.isAccessLogEnabled()) {
+      return;
+    }
+
+    final long durationMillis = durationNanos / 1_000_000L;
+    // WHY null-safe method extraction: Request can be null for parse errors/timeouts. We still
+    // log the event but use "-" for method and path (common in access log formats like Apache).
+    final HttpMethod method = request != null ? request.getMethod() : null;
+    // WHY special handling for HEAD: RFC 9110 requires HEAD responses to omit body but include
+    // Content-Length header. We log 0 bytes written for HEAD to accurately reflect network I/O.
+    final boolean headRequest = method == HttpMethod.HEAD;
+
+    final AccessLogger.Entry entry =
+        new AccessLogger.Entry(
+            clientAddress,
+            method != null ? method.name() : "-",
+            request != null ? request.getPath() : "-",
+            request != null ? buildQueryString(request) : null,
+            determineHttpVersion(request, response),
+            response.getStatus().getCode(),
+            request != null ? request.getContentLength() : 0L,
+            headRequest ? 0L : response.getBytesWritten(),
+            durationMillis,
+            response.isConnectionPersistent(),
+            requestId);
+
+    accessLogger.log(entry);
+  }
+
+  /**
+   * Determines HTTP version for access logs.
+   *
+   * <p>WHY prefer request version: In normal cases, log the version the client used (from the
+   * request line). For parse errors where we have no request object, fall back to the response
+   * version (which defaults to HTTP/1.1 in error responses).
+   */
+  private String determineHttpVersion(final HttpRequest request, final HttpResponse response) {
+    if (request != null && request.getVersion() != null) {
+      return request.getVersion().getValue();
+    }
+    return response.getVersion().getValue();
+  }
+
+  /**
+   * Records HTTP metrics for request lifecycle.
+   *
+   * <p>WHY null method parameter: When parsing fails (parse error, timeout), we have no HttpRequest
+   * so method is null. Metrics implementations track this separately (e.g., as "PARSE_ERROR"
+   * category) to distinguish infrastructure failures from application-level errors.
+   *
+   * <p>WHY HEAD request special case: HEAD responses don't include body content, so we record 0
+   * bytes written even though Content-Length header may indicate a larger size (what GET would
+   * return). This accurately reflects actual network traffic.
+   */
+  private void updateMetrics(
+      final HttpRequest request, final HttpResponse response, final long durationNanos) {
+    if (!metricsEnabled() || response == null) {
+      return;
+    }
+
+    final HttpMethod method = request != null ? request.getMethod() : null;
+    final boolean headRequest = method == HttpMethod.HEAD;
+    metrics.recordRequest(
+        method,
+        response.getStatus(),
+        durationNanos / 1_000_000L,
+        headRequest ? 0L : response.getBytesWritten());
+  }
+
+  private String buildQueryString(final HttpRequest request) {
+    if (request == null || request.getQueryParams().isEmpty()) {
+      return null;
+    }
+    return request.getQueryParams().entrySet().stream()
+        .map(entry -> entry.getKey() + "=" + entry.getValue())
+        .collect(Collectors.joining("&"));
   }
 }

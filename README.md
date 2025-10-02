@@ -29,7 +29,7 @@ SERVER_PORT=9090 ./gradlew run
 ### Test
 
 ```bash
-# Run all tests (151 unit tests)
+# Run all tests (163 unit tests)
 ./gradlew test
 
 # Run specific test class
@@ -138,6 +138,9 @@ curl http://localhost:8080/
 
 # Test keep-alive with multiple requests
 curl -v http://localhost:8080/ http://localhost:8080/
+
+# Check metrics endpoint
+curl http://localhost:8080/metrics
 ```
 
 ## ⚙️ Configuration
@@ -165,6 +168,15 @@ The server can be configured using environment variables:
 | `HTTP_MAX_HEADERS_COUNT` | Maximum number of header fields | `100` |
 | `HTTP_MAX_CONTENT_LENGTH` | Maximum request body size (bytes) | `10485760` (10MB) |
 | `DOCUMENT_ROOT` | Document root for serving static files | `./public` |
+
+### Observability Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `OBS_ACCESS_LOG_ENABLED` | Enable structured HTTP access logs | `true` |
+| `OBS_METRICS_ENABLED` | Collect in-memory HTTP metrics | `true` |
+| `OBS_METRICS_ENDPOINT_PATH` | Path exposing metrics snapshot | `/metrics` |
+| `OBS_PARSE_ERROR_LOGS_PER_MINUTE` | Max parse-error logs per minute (`-1` disables throttling) | `-1` |
 
 ### Example
 
@@ -304,19 +316,27 @@ java-web-server/
 │   │   │   │   ├── parser/                                 # HTTP parsing (security boundary)
 │   │   │   │   │   ├── HttpRequestParser.java              # RFC 9112 compliant parser
 │   │   │   │   │   └── HttpParseException.java             # Parse errors
-│   │   │   │   └── handler/                                # Request handlers
-│   │   │   │       ├── HttpRequestHandler.java             # Strategy interface
-│   │   │   │       ├── HttpConnectionHandler.java          # Keep-alive connection loop
-│   │   │   │       └── FileServerHandler.java              # Static file serving
+│   │   │   │   ├── handler/                                # Request handlers
+│   │   │   │   │   ├── HttpRequestHandler.java             # Strategy interface
+│   │   │   │   │   ├── HttpConnectionHandler.java          # Keep-alive connection loop
+│   │   │   │   │   ├── FileServerHandler.java              # Static file serving
+│   │   │   │   │   └── MetricsRequestHandler.java          # /metrics endpoint
+│   │   │   │   └── observability/                          # Metrics and access logs
+│   │   │   │       ├── ObservabilityConfig.java            # Environment configuration
+│   │   │   │       ├── HttpMetrics.java                    # Metrics interface
+│   │   │   │       ├── HttpMetricsRecorder.java            # Thread-safe metrics impl
+│   │   │   │       ├── HttpMetricsSnapshot.java            # Immutable snapshot
+│   │   │   │       └── AccessLogger.java                   # Structured access logs
 │   │   │   └── resources/
 │   │   │       ├── logback.xml                             # Default logging config
 │   │   │       ├── logback-dev.xml                         # Development logging
 │   │   │       └── logback-production.xml                  # Production logging
 │   │   └── test/
-│   │       └── java/                                       # 151 unit tests
+│   │       └── java/                                       # 163 unit tests
 │   │           ├── http/                                   # HTTP layer tests (90 tests)
 │   │           ├── parser/                                 # Parser tests (36 tests)
-│   │           └── handler/                                # Handler tests (35 tests)
+│   │           ├── handler/                                # Handler tests (35 tests)
+│   │           └── observability/                          # Observability tests (2 tests)
 │   └── build.gradle.kts                                    # Build configuration
 ├── config/
 │   └── checkstyle/checkstyle.xml                           # Code style rules
@@ -331,29 +351,35 @@ java-web-server/
 ### Where to Start Reading the Code
 
 **1. Entry Point & Architecture** (`WebServer.java:175`)
+
 - Virtual thread executor setup
 - Environment variable configuration (centralized)
 - Factory pattern for thread-safe connection handlers
 - Graceful shutdown handling
 
 **2. Connection Lifecycle** (`HttpConnectionHandler.java:40`)
+
 - Keep-alive loop implementation
 - HTTP/1.1 vs HTTP/1.0 persistence logic
 - Error handling and timeout management
 - Handler directive priority over client preferences
+- Observability integration (metrics and access logs on every path)
 
 **3. HTTP Parsing** (`HttpRequestParser.java:63`)
+
 - **Security critical**: DoS prevention via configurable limits
 - RFC 9112 compliant request line and header parsing
 - Graceful EOF handling for HTTP pipelining
 - Validation: Host header required for HTTP/1.1
 
 **4. Request/Response Model**
+
 - `HttpRequest.java:28` - Immutable request with keep-alive logic
 - `HttpResponse.java:29` - Builder pattern with lazy streaming
 - `HttpHeaders.java:17` - Case-insensitive header storage (RFC 9110)
 
 **5. File Serving** (`FileServerHandler.java:42`)
+
 - **Security critical**: Path traversal prevention
 - MIME type detection with fallback
 - Lazy file streaming to prevent OOM
@@ -362,14 +388,20 @@ java-web-server/
 ### Key Design Patterns
 
 **Factory Pattern** - Thread safety via per-connection handler instances
+
 ```java
 ConnectionHandlerFactory factory = () -> {
     HttpRequestParser parser = new HttpRequestParser(...);
-    return new HttpConnectionHandler(fileHandler, parser, timeout);
+    ObservabilityConfig obsConfig = ObservabilityConfig.fromEnvironment();
+    HttpMetricsRecorder metrics = new HttpMetricsRecorder();
+    AccessLogger accessLogger = new AccessLogger(obsConfig.isAccessLogEnabled());
+    return new HttpConnectionHandler(
+        fileHandler, parser, timeout, metrics, obsConfig, accessLogger);
 };
 ```
 
 **Builder Pattern** - Fluent HTTP response construction
+
 ```java
 HttpResponse response = new HttpResponse()
     .status(HttpStatus.OK)
@@ -379,6 +411,7 @@ HttpResponse response = new HttpResponse()
 ```
 
 **Strategy Pattern** - Pluggable request handlers
+
 ```java
 interface HttpRequestHandler {
     HttpResponse handle(HttpRequest request) throws IOException;
@@ -386,6 +419,7 @@ interface HttpRequestHandler {
 ```
 
 **Lazy Evaluation** - Streaming without loading into memory
+
 ```java
 response.setBodySupplier(() -> Files.newInputStream(file));
 ```
@@ -393,12 +427,14 @@ response.setBodySupplier(() -> Files.newInputStream(file));
 ### Critical Security Boundaries
 
 **1. Parser Limits** (`HttpRequestParser.java:63`)
+
 - Request line: 8KB max (prevents header injection)
 - Headers section: 8KB max (prevents DoS)
 - Header count: 100 max (prevents hash collision attacks)
 - Body size: 10MB max (prevents OOM)
 
 **2. Path Traversal Prevention** (`FileServerHandler.java:146`)
+
 ```java
 Path resolved = documentRoot.resolve(cleanPath).normalize();
 if (!resolved.startsWith(documentRoot)) {
@@ -407,23 +443,267 @@ if (!resolved.startsWith(documentRoot)) {
 ```
 
 **3. XSS Prevention** (`HttpResponse.java:243`)
+
 - HTML entity escaping in error messages
 - Prevents reflected XSS in error pages
 
 ### Testing Philosophy
 
-**All 151 tests follow**: *"A test that does not find bugs is a failed test"*
+**All 163 tests follow**: *"A test that does not find bugs is a failed test"*
 
 Tests focus on:
+
 - **Security bugs**: Path traversal, DoS, XSS, protocol violations
 - **Connection bugs**: Leaks, premature close, version confusion
 - **Integration bugs**: Response mixing, parser invocation count, EOF handling
 
 Run tests:
+
 ```bash
-./gradlew test  # All 151 tests
+./gradlew test  # All 163 tests
 ./gradlew test --tests "*.handler.*"  # Handler layer only
+./gradlew test --tests "*.observability.*"  # Observability layer only
 ```
+
+## 📊 Observability
+
+The server includes comprehensive observability features for monitoring HTTP traffic, performance, and errors.
+
+### Overview
+
+Observability is built into every request path:
+
+- **Access Logs**: Structured JSON logs for every HTTP request (success and failure)
+- **Metrics**: In-memory counters and histograms for requests, status codes, latency, and bytes transferred
+- **Request Tracing**: X-Request-Id header support for distributed tracing
+- **Error Tracking**: Parse errors, timeouts, and I/O failures are logged with full context
+
+### Access Logs
+
+Structured JSON logs emitted for every HTTP request, including:
+
+```json
+{
+  "@timestamp": "2025-10-02T14:23:45.123Z",
+  "logger_name": "ch.alejandrogarciahub.webserver.observability.AccessLogger",
+  "level": "INFO",
+  "client_address": "/127.0.0.1:54321",
+  "method": "GET",
+  "path": "/index.html",
+  "query_string": "page=1&size=10",
+  "http_version": "HTTP/1.1",
+  "status": 200,
+  "content_length_in": 0,
+  "bytes_written": 1234,
+  "duration_millis": 15,
+  "connection_persistent": true,
+  "request_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+}
+```
+
+**Key Features:**
+
+- **Null-safe**: Parse errors and timeouts log with `-` placeholders for missing request fields
+- **HEAD request handling**: Correctly logs 0 bytes written (no body) while preserving Content-Length
+- **Error scenarios**: Parse errors (400), timeouts (408), and I/O errors (500) all emit access logs
+- **Request IDs**: Auto-generated UUID or client-provided `X-Request-Id` for correlation
+
+**Configuration:**
+
+```bash
+# Enable/disable access logs (default: true)
+OBS_ACCESS_LOG_ENABLED=true
+
+# Throttle parse error logs (default: -1 = unlimited)
+OBS_PARSE_ERROR_LOGS_PER_MINUTE=10
+```
+
+### Metrics Endpoint
+
+Real-time HTTP metrics available at `/metrics`:
+
+```bash
+curl http://localhost:8080/metrics
+```
+
+**Response:**
+
+```json
+{
+  "totalRequests": 1523,
+  "activeConnections": 5,
+  "totalBytesWritten": 15728640,
+  "statusCounts": {
+    "SUCCESS": 1450,
+    "CLIENT_ERROR": 50,
+    "SERVER_ERROR": 23
+  },
+  "latencyBuckets": {
+    "lt_100ms": 1200,
+    "lt_500ms": 250,
+    "lt_1s": 50,
+    "lt_5s": 20,
+    "gte_5s": 3
+  }
+}
+```
+
+**Metrics Tracked:**
+
+- **Total Requests**: Count of all HTTP requests (including errors)
+- **Active Connections**: Current number of open TCP connections
+- **Total Bytes Written**: Cumulative response body bytes sent
+- **Status Counts**: Requests grouped by status category (SUCCESS=2xx, REDIRECT=3xx, CLIENT_ERROR=4xx, SERVER_ERROR=5xx)
+- **Latency Buckets**: Request duration histogram (<100ms, <500ms, <1s, <5s, ≥5s)
+
+**Configuration:**
+
+```bash
+# Enable/disable metrics collection (default: true)
+OBS_METRICS_ENABLED=true
+
+# Customize metrics endpoint path (default: /metrics)
+OBS_METRICS_ENDPOINT_PATH=/metrics
+```
+
+### Request Tracing
+
+The server supports distributed tracing via the `X-Request-Id` header:
+
+**Client-provided ID** (for multi-service tracing):
+
+```bash
+curl -H "X-Request-Id: trace-abc-123" http://localhost:8080/
+```
+
+**Server-generated ID** (if header not provided):
+
+```bash
+curl http://localhost:8080/
+# Server generates UUID: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+```
+
+All logs and metrics for a request use the same ID, enabling:
+
+- **End-to-end tracing** across microservices
+- **Error correlation** between parse failures and access logs
+- **Performance debugging** by request ID
+
+**Implementation Detail:**
+
+Request IDs are seeded *before* parsing to ensure parse errors and timeouts have correlated logs, even when the request object doesn't exist yet.
+
+### Error Observability
+
+Every error path emits complete observability data:
+
+| Error Type | Status | Access Log | Metrics | Request Field |
+|------------|--------|------------|---------|---------------|
+| Parse error | 400 | ✅ (method=`-`, path=`-`) | ✅ (method=`null`) | ❌ (parsing failed) |
+| Socket timeout | 408 | ✅ (method=`-`, path=`-`) | ✅ (method=`null`) | ❌ (timeout before request) |
+| I/O error | 500 | ✅ (full request if parsed) | ✅ (method may exist) | ✅/❌ (depends on error timing) |
+| Unexpected exception | 500 | ✅ (full request if parsed) | ✅ (method may exist) | ✅/❌ (depends on error timing) |
+
+**Why this matters:**
+
+- **Parse errors** indicate potential attacks or buggy clients
+- **Timeouts** reveal slow/malicious clients or network issues
+- **I/O errors** during response write suggest client disconnects
+- All tracked separately in metrics to distinguish infrastructure vs application failures
+
+### Observability Architecture
+
+**Centralized Pattern:**
+
+All code paths (success and error handlers) call `finalizeObservability()`:
+
+```java
+// Success path: emits logs/metrics after response write
+finalizeObservability(clientAddress, request, response, durationNanos, requestId);
+
+// Error paths: emits logs/metrics with null request or synthetic response
+finalizeObservability(clientAddress, null, response, durationNanos, requestId);
+```
+
+**Benefits:**
+
+- Consistent observability across all execution paths
+- No code duplication (previously 5 locations)
+- Easy to add new observability features (e.g., distributed tracing spans)
+
+**Synthetic Responses:**
+
+For errors where no response is sent to the client (e.g., socket timeout), the server creates a "synthetic response" with just status code and metadata for logging/metrics purposes only.
+
+### Monitoring Best Practices
+
+**1. Track Parse Error Rate:**
+
+High parse error rate indicates:
+
+- DoS attack attempts
+- Misconfigured clients
+- Protocol implementation bugs
+
+```bash
+# Monitor parse errors in logs
+grep '"status":400' logs/application.log | wc -l
+```
+
+**2. Monitor Timeout Rate:**
+
+High timeout rate suggests:
+
+- Slow clients
+- DDoS attacks
+- Network issues
+
+```bash
+# Check metrics endpoint
+curl -s http://localhost:8080/metrics | jq '.statusCounts.CLIENT_ERROR'
+```
+
+**3. Track Latency Distribution:**
+
+Most requests should be <100ms for static file serving:
+
+```bash
+curl -s http://localhost:8080/metrics | jq '.latencyBuckets'
+```
+
+**4. Monitor Active Connections:**
+
+Growing connection count without requests indicates:
+
+- Connection leaks
+- Keep-alive timeout issues
+- Slowloris attacks
+
+```bash
+curl -s http://localhost:8080/metrics | jq '.activeConnections'
+```
+
+### Configuration Summary
+
+```bash
+# Full observability configuration
+export OBS_ACCESS_LOG_ENABLED=true              # Enable access logs
+export OBS_METRICS_ENABLED=true                 # Enable metrics collection
+export OBS_METRICS_ENDPOINT_PATH=/metrics       # Metrics endpoint path
+export OBS_PARSE_ERROR_LOGS_PER_MINUTE=-1      # Throttle parse error logs (-1 = unlimited)
+```
+
+### Implementation Files
+
+| File | Purpose |
+|------|---------|
+| `ObservabilityConfig.java` | Environment variable configuration |
+| `HttpMetrics.java` | Metrics interface |
+| `HttpMetricsRecorder.java` | Thread-safe in-memory metrics implementation |
+| `HttpMetricsSnapshot.java` | Immutable snapshot for `/metrics` endpoint |
+| `AccessLogger.java` | Structured JSON access log emitter |
+| `MetricsRequestHandler.java` | Handler for `/metrics` endpoint |
+| `HttpConnectionHandler.java` | Integration point (calls observability on every path) |
 
 ## 🔧 Logging Configuration
 
@@ -510,15 +790,16 @@ testImplementation("org.assertj:assertj-core:3.24.2")
 ## 🎯 Project Goals
 
 - ✅ Multi-threaded request handling (Java 21 virtual threads)
-- ✅ JSON structured logging
-- ✅ Docker containerization
-- ✅ HTTP/1.1 request parsing
+- ✅ JSON structured logging (SLF4J + Logback)
+- ✅ Docker containerization with multi-stage builds
+- ✅ HTTP/1.1 request parsing (RFC 9112 compliant)
 - ✅ HTTP/1.1 response generation
-- ✅ Static file serving
-- ✅ HTTP/1.1 keep-alive support
-- ✅ MIME type detection
+- ✅ Static file serving with security (path traversal prevention)
+- ✅ HTTP/1.1 keep-alive support (persistent connections)
+- ✅ MIME type detection with fallback
 - ✅ GET and HEAD methods
 - ✅ Thread-safe connection handling (factory pattern)
+- ✅ Observability (access logs, metrics endpoint, request tracing)
 
 ## 📖 Additional Documentation
 
