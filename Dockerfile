@@ -70,6 +70,10 @@ ENV ENV=production \
     HTTP_MAX_HEADERS_COUNT=100 \
     HTTP_MAX_CONTENT_LENGTH=10485760 \
     DOCUMENT_ROOT=./public \
+    OBS_ACCESS_LOG_ENABLED=true \
+    OBS_METRICS_ENABLED=true \
+    OBS_METRICS_ENDPOINT_PATH=/metrics \
+    OBS_PARSE_ERROR_LOGS_PER_MINUTE=-1 \
     JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75.0 -XX:+UseContainerSupport"
 
 # Health check (uses SERVER_PORT env var)

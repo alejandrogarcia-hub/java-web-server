@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Java Web Server</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+        .container {
+            background: rgba(255, 255, 255, 0.1);
+            padding: 30px;
+            border-radius: 10px;
+            backdrop-filter: blur(10px);
+        }
+        h1 { margin-top: 0; }
+        .metrics-link {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 10px 20px;
+            background: rgba(255, 255, 255, 0.2);
+            text-decoration: none;
+            color: white;
+            border-radius: 5px;
+            transition: background 0.3s;
+        }
+        .metrics-link:hover {
+            background: rgba(255, 255, 255, 0.3);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 Java Web Server</h1>
+        <p>Multi-threaded HTTP/1.1 web server with observability</p>
+        <ul>
+            <li>✅ Virtual threads (Java 21)</li>
+            <li>✅ HTTP/1.1 keep-alive support</li>
+            <li>✅ JSON structured logging</li>
+            <li>✅ Real-time metrics endpoint</li>
+            <li>✅ Request tracing with X-Request-Id</li>
+        </ul>
+        <a href="/metrics" class="metrics-link">📊 View Metrics</a>
+    </div>
+</body>
+</html>
