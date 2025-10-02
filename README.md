@@ -47,15 +47,27 @@ make test
 
 The server can be configured using environment variables:
 
+### Server Configuration
+
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `SERVER_PORT` | HTTP listening port | `8080` |
 | `SERVER_ACCEPT_TIMEOUT_MS` | Accept loop timeout (milliseconds) | `5000` |
 | `SERVER_BACKLOG` | Connection queue size | `100` |
 | `SERVER_SHUTDOWN_TIMEOUT_SEC` | Graceful shutdown timeout (seconds) | `30` |
-| `SERVER_CLIENT_SO_TIMEOUT_MS` | Client socket read timeout (milliseconds) | `15000` |
+| `CLIENT_READ_TIMEOUT_MS` | Client socket read timeout (milliseconds) | `15000` |
 | `ENV` | Environment mode (`dev` or `production`) | `dev` |
 | `LOG_DIR` | Log directory (production mode only) | `./logs` |
+
+### HTTP Configuration
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `HTTP_MAX_REQUEST_LINE_LENGTH` | Maximum request line length (bytes) | `8192` |
+| `HTTP_MAX_HEADER_SIZE` | Maximum total header section size (bytes) | `8192` |
+| `HTTP_MAX_HEADERS_COUNT` | Maximum number of header fields | `100` |
+| `HTTP_MAX_CONTENT_LENGTH` | Maximum request body size (bytes) | `10485760` (10MB) |
+| `DOCUMENT_ROOT` | Document root for serving static files | `./public` |
 
 ### Example
 
@@ -286,11 +298,13 @@ testImplementation("org.assertj:assertj-core:3.24.2")
 - ✅ Multi-threaded request handling (Java 21 virtual threads)
 - ✅ JSON structured logging
 - ✅ Docker containerization
-- ⏳ HTTP/1.1 request parsing (TODO)
-- ⏳ HTTP/1.1 response generation (TODO)
-- ⏳ Static file serving (TODO)
-- ⏳ HTTP/1.1 keep-alive support (TODO)
-- ⏳ MIME type detection (TODO)
+- ✅ HTTP/1.1 request parsing
+- ✅ HTTP/1.1 response generation
+- ✅ Static file serving
+- ✅ HTTP/1.1 keep-alive support
+- ✅ MIME type detection
+- ✅ GET and HEAD methods
+- ✅ Thread-safe connection handling (factory pattern)
 
 ## 📖 Additional Documentation
 

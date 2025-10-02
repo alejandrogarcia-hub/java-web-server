@@ -59,7 +59,7 @@ class WebServerTest {
   private void startTestServer(int shutdownTimeoutSeconds, ConnectionHandler handler)
       throws Exception {
     testPort = allocateEphemeralPort();
-    server = new WebServer(testPort, 1000, 50, shutdownTimeoutSeconds, 15000, handler);
+    server = new WebServer(testPort, 1000, 50, shutdownTimeoutSeconds, 15000, () -> handler);
     startServerInBackground();
     waitForServerStartup();
   }
@@ -131,7 +131,7 @@ class WebServerTest {
   void testMultipleConcurrentConnections() throws Exception {
     // Arrange
     testPort = allocateEphemeralPort();
-    server = new WebServer(testPort, 1000, 200, 10, 15000, new NoopConnectionHandler());
+    server = new WebServer(testPort, 1000, 200, 10, 15000, () -> new NoopConnectionHandler());
     startServerInBackground();
     waitForServerStartup();
 
@@ -297,7 +297,7 @@ class WebServerTest {
   void testAcceptTimeoutAllowsResponsiveShutdown() throws Exception {
     // Arrange
     testPort = allocateEphemeralPort();
-    server = new WebServer(testPort, 2000, 50, 5, 15000, new NoopConnectionHandler());
+    server = new WebServer(testPort, 2000, 50, 5, 15000, () -> new NoopConnectionHandler());
     startServerInBackground();
     waitForServerStartup();
 
@@ -326,7 +326,7 @@ class WebServerTest {
   void testShutdownWhenNotRunning() throws Exception {
     // Arrange - Server created but not started
     testPort = allocateEphemeralPort();
-    server = new WebServer(testPort, 1000, 50, 5, 15000, new NoopConnectionHandler());
+    server = new WebServer(testPort, 1000, 50, 5, 15000, () -> new NoopConnectionHandler());
 
     // Act
     server.shutdown();

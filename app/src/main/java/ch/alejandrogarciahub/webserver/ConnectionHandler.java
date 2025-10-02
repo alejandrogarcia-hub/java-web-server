@@ -10,7 +10,7 @@ import java.net.Socket;
  * custom handlers to simulate long-running requests or failure scenarios.
  */
 @FunctionalInterface
-interface ConnectionHandler {
+public interface ConnectionHandler {
 
   void handle(Socket clientSocket) throws Exception;
 }

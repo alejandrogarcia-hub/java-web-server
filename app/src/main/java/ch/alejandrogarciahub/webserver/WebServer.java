@@ -3,6 +3,9 @@
  */
 package ch.alejandrogarciahub.webserver;
 
+import ch.alejandrogarciahub.webserver.handler.FileServerHandler;
+import ch.alejandrogarciahub.webserver.handler.HttpConnectionHandler;
+import ch.alejandrogarciahub.webserver.parser.HttpRequestParser;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -12,6 +15,7 @@ import java.net.SocketTimeoutException;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.concurrent.ExecutorService;
@@ -67,13 +71,19 @@ public class WebServer {
   private static final int DEFAULT_SHUTDOWN_TIMEOUT_SEC = 30;
   private static final int DEFAULT_CLIENT_SO_TIMEOUT_MS = 15000;
 
+  // HTTP parser limits defaults
+  private static final int DEFAULT_MAX_REQUEST_LINE_LENGTH = 8192;
+  private static final int DEFAULT_MAX_HEADER_SIZE = 8192;
+  private static final int DEFAULT_MAX_HEADERS_COUNT = 100;
+  private static final long DEFAULT_MAX_CONTENT_LENGTH = 10 * 1024 * 1024; // 10MB
+
   // Server configuration (loaded from environment variables)
   private final int port;
   private final int acceptTimeoutMs;
   private final int backlog;
   private final int shutdownTimeoutSeconds;
   private final int clientReadTimeoutMs;
-  private final ConnectionHandler connectionHandler;
+  private final ConnectionHandlerFactory connectionHandlerFactory;
 
   // Lifecycle management
   private volatile boolean running = false;
@@ -91,6 +101,12 @@ public class WebServer {
    *   <li><code>SERVER_ACCEPT_TIMEOUT_MS</code>: Accept timeout in milliseconds (default: 5000)
    *   <li><code>SERVER_BACKLOG</code>: Connection queue size (default: 100)
    *   <li><code>SERVER_SHUTDOWN_TIMEOUT_SEC</code>: Graceful shutdown timeout (default: 30)
+   *   <li><code>CLIENT_READ_TIMEOUT_MS</code>: Client socket read timeout (default: 15000)
+   *   <li><code>HTTP_MAX_REQUEST_LINE_LENGTH</code>: Maximum request line length (default: 8192)
+   *   <li><code>HTTP_MAX_HEADER_SIZE</code>: Maximum header section size (default: 8192)
+   *   <li><code>HTTP_MAX_HEADERS_COUNT</code>: Maximum number of headers (default: 100)
+   *   <li><code>HTTP_MAX_CONTENT_LENGTH</code>: Maximum body size in bytes (default: 10485760)
+   *   <li><code>DOCUMENT_ROOT</code>: Document root for file serving (default: "./public")
    * </ul>
    */
   public WebServer() {
@@ -99,8 +115,40 @@ public class WebServer {
         getEnvAsInt("SERVER_ACCEPT_TIMEOUT_MS", DEFAULT_ACCEPT_TIMEOUT_MS),
         getEnvAsInt("SERVER_BACKLOG", DEFAULT_BACKLOG),
         getEnvAsInt("SERVER_SHUTDOWN_TIMEOUT_SEC", DEFAULT_SHUTDOWN_TIMEOUT_SEC),
-        getEnvAsInt("SERVER_CLIENT_SO_TIMEOUT_MS", DEFAULT_CLIENT_SO_TIMEOUT_MS),
-        new LoggingConnectionHandler());
+        getEnvAsInt("CLIENT_READ_TIMEOUT_MS", DEFAULT_CLIENT_SO_TIMEOUT_MS),
+        createProductionHandlerFactory());
+  }
+
+  /**
+   * Creates the production HTTP connection handler factory.
+   *
+   * <p>This factory creates instances of {@link HttpConnectionHandler} with {@link
+   * FileServerHandler} for serving static files.
+   *
+   * @return a factory that creates HTTP connection handlers
+   */
+  private static ConnectionHandlerFactory createProductionHandlerFactory() {
+    // Read configuration from environment
+    final int clientReadTimeoutMs =
+        getEnvAsInt("CLIENT_READ_TIMEOUT_MS", DEFAULT_CLIENT_SO_TIMEOUT_MS);
+    final int maxRequestLineLength =
+        getEnvAsInt("HTTP_MAX_REQUEST_LINE_LENGTH", DEFAULT_MAX_REQUEST_LINE_LENGTH);
+    final int maxHeaderSize = getEnvAsInt("HTTP_MAX_HEADER_SIZE", DEFAULT_MAX_HEADER_SIZE);
+    final int maxHeadersCount = getEnvAsInt("HTTP_MAX_HEADERS_COUNT", DEFAULT_MAX_HEADERS_COUNT);
+    final long maxContentLength =
+        getEnvAsLong("HTTP_MAX_CONTENT_LENGTH", DEFAULT_MAX_CONTENT_LENGTH);
+    final String documentRoot = System.getenv().getOrDefault("DOCUMENT_ROOT", "./public");
+
+    // FileServerHandler is thread-safe and can be shared
+    final FileServerHandler fileHandler = new FileServerHandler(Paths.get(documentRoot));
+
+    // Factory creates a new HttpConnectionHandler and HttpRequestParser per connection
+    return () -> {
+      final HttpRequestParser parser =
+          new HttpRequestParser(
+              maxRequestLineLength, maxHeaderSize, maxHeadersCount, maxContentLength);
+      return new HttpConnectionHandler(fileHandler, parser, clientReadTimeoutMs);
+    };
   }
 
   /**
@@ -125,7 +173,7 @@ public class WebServer {
         backlog,
         shutdownTimeoutSeconds,
         DEFAULT_CLIENT_SO_TIMEOUT_MS,
-        new LoggingConnectionHandler());
+        () -> new LoggingConnectionHandler());
   }
 
   WebServer(
@@ -134,14 +182,15 @@ public class WebServer {
       final int backlog,
       final int shutdownTimeoutSeconds,
       final int clientReadTimeoutMs,
-      final ConnectionHandler connectionHandler) {
+      final ConnectionHandlerFactory connectionHandlerFactory) {
     this.port = port;
     this.acceptTimeoutMs = acceptTimeoutMs;
     this.backlog = backlog;
     this.shutdownTimeoutSeconds = shutdownTimeoutSeconds;
     this.clientReadTimeoutMs = clientReadTimeoutMs;
     // Allow tests or future HTTP pipelines to plug in their own handling logic.
-    this.connectionHandler = Objects.requireNonNull(connectionHandler, "connectionHandler");
+    this.connectionHandlerFactory =
+        Objects.requireNonNull(connectionHandlerFactory, "connectionHandlerFactory");
 
     logger.info(
         "Server configured: port={}, acceptTimeout={}ms, backlog={}, clientReadTimeout={}ms, shutdownTimeout={}s",
@@ -197,8 +246,8 @@ public class WebServer {
 
         logger.debug("Connection accepted from {}", clientSocket.getRemoteSocketAddress());
 
-        // Each connection runs on its own virtual thread for fast hand-off and isolation.
-        executor.submit(() -> handleConnection(clientSocket));
+        // Each connection runs on its own virtual thread with its own handler instance
+        executor.submit(() -> handleConnection(clientSocket, connectionHandlerFactory.create()));
 
       } catch (final SocketTimeoutException e) {
         // Expected - no connection within timeout period, continue loop
@@ -239,21 +288,22 @@ public class WebServer {
   }
 
   /**
-   * Handles a single client connection.
+   * Handles a single client connection with a dedicated handler instance.
    *
-   * <p>Currently a placeholder that logs the connection and closes the socket. This method will be
-   * extended in future phases to delegate to a RequestHandler for HTTP request processing.
+   * <p>Each connection is processed independently with its own ConnectionHandler instance, ensuring
+   * thread safety and isolation.
    *
    * @param clientSocket the accepted client socket
+   * @param handler the handler instance for this connection
    */
-  private void handleConnection(final Socket clientSocket) {
+  private void handleConnection(final Socket clientSocket, final ConnectionHandler handler) {
     try (clientSocket) {
       logger.debug(
           "Handling connection from {} on thread {}",
           clientSocket.getRemoteSocketAddress(),
           Thread.currentThread().getName());
 
-      connectionHandler.handle(clientSocket);
+      handler.handle(clientSocket);
     } catch (final InterruptedException e) {
       Thread.currentThread().interrupt();
       logger.debug("Connection handling interrupted", e);
@@ -362,6 +412,29 @@ public class WebServer {
     } catch (final NumberFormatException e) {
       logger.warn(
           "Invalid integer value for {}: '{}', using default: {}", key, value, defaultValue);
+      return defaultValue;
+    }
+  }
+
+  /**
+   * Retrieves a long value from an environment variable with a default fallback.
+   *
+   * <p>If the environment variable is not set, empty, or contains an invalid long, the default
+   * value is returned and a warning is logged.
+   *
+   * @param key the environment variable name
+   * @param defaultValue the default value to use if the variable is not set or invalid
+   * @return the parsed long value or the default value
+   */
+  private static long getEnvAsLong(final String key, final long defaultValue) {
+    final String value = System.getenv(key);
+    if (value == null || value.isEmpty()) {
+      return defaultValue;
+    }
+    try {
+      return Long.parseLong(value);
+    } catch (final NumberFormatException e) {
+      logger.warn("Invalid long value for {}: '{}', using default: {}", key, value, defaultValue);
       return defaultValue;
     }
   }
