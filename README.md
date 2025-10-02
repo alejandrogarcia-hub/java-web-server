@@ -297,7 +297,7 @@ See [DOCKER.md](DOCKER.md) for detailed Docker deployment guide.
 
 ## 📁 Project Structure
 
-```
+```mermaid
 java-web-server/
 ├── app/
 │   ├── src/
@@ -801,11 +801,18 @@ testImplementation("org.assertj:assertj-core:3.24.2")
 - ✅ Thread-safe connection handling (factory pattern)
 - ✅ Observability (access logs, metrics endpoint, request tracing)
 
+## 🚧 Future Enhancements
+
+What we haven't tackled yet—none of these are blockers for basic page loads, but they matter for richer browser features:
+
+- **Range / partial responses**: No 206 support, so paused/resumed downloads or video scrubbing won't work.
+- **Validation/caching headers**: We always return 200; there's no If-Modified-Since, ETag, Cache-Control, or Date, so browsers re-fetch aggressively.
+- **Compression**: No Content-Encoding: gzip/br negotiation, so payloads are larger than they need to be.
+- **Chunked transfer**: Every response requires a known Content-Length; dynamic streaming without precomputing length isn't possible yet.
+- **Host enforcement**: We accept HTTP/1.1 requests missing the Host header; strictly speaking we should reject them with 400.
+- **Error friendliness**: Directory listings, default charset headers for text, and helpful 404 pages could be fleshed out when needed.
+
 ## 📖 Additional Documentation
 
 - [LOGGING.md](LOGGING.md) - Logging configuration and usage
 - [DOCKER.md](DOCKER.md) - Docker deployment guide
-
-## 📝 License
-
-This is a learning project for building HTTP servers in Java.
