@@ -297,7 +297,7 @@ See [DOCKER.md](DOCKER.md) for detailed Docker deployment guide.
 
 ## 📁 Project Structure
 
-```mermaid
+```
 java-web-server/
 ├── app/
 │   ├── src/
